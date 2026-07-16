@@ -1,0 +1,47 @@
+// swift-tools-version: 6.2
+import PackageDescription
+
+let package = Package(
+  name: "bsp-mux",
+  platforms: [
+    .macOS(.v14)
+  ],
+  products: [
+    .executable(name: "bsp-mux", targets: ["bsp-mux"]),
+    .executable(name: "fake-bsp-backend", targets: ["fake-bsp-backend"]),
+  ],
+  dependencies: [
+    .package(url: "https://github.com/swiftlang/swift-tools-protocols.git", exact: "0.0.10"),
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+  ],
+  targets: [
+    .target(
+      name: "BSPMuxCore",
+      dependencies: [
+        .product(name: "BuildServerProtocol", package: "swift-tools-protocols"),
+        .product(name: "LanguageServerProtocolTransport", package: "swift-tools-protocols"),
+        .product(name: "SKLogging", package: "swift-tools-protocols"),
+        .product(name: "Crypto", package: "swift-crypto"),
+      ]
+    ),
+    .executableTarget(
+      name: "bsp-mux",
+      dependencies: ["BSPMuxCore"]
+    ),
+    .executableTarget(
+      name: "fake-bsp-backend",
+      dependencies: [
+        .product(name: "BuildServerProtocol", package: "swift-tools-protocols"),
+        .product(name: "LanguageServerProtocolTransport", package: "swift-tools-protocols"),
+      ]
+    ),
+    .testTarget(
+      name: "BSPMuxCoreTests",
+      dependencies: ["BSPMuxCore"]
+    ),
+    .testTarget(
+      name: "BSPMuxIntegrationTests",
+      dependencies: ["BSPMuxCore"]
+    ),
+  ]
+)
