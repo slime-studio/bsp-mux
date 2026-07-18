@@ -16,11 +16,9 @@ public struct Installer {
   }
 
   private let fileSystem: FileSystemProviding
-  private let pathResolver: PathResolving
 
-  public init(fileSystem: FileSystemProviding = RealFileSystem(), pathResolver: PathResolving = RealPathResolver()) {
+  public init(fileSystem: FileSystemProviding = RealFileSystem()) {
     self.fileSystem = fileSystem
-    self.pathResolver = pathResolver
   }
 
   /// - Parameters:
@@ -52,9 +50,9 @@ public struct Installer {
       throw Error(description: "\(buildServerJSONPath) has no non-empty 'argv' array")
     }
 
-    let resolvedMultiplexerPath = pathResolver.resolvePath(multiplexerExecutable)
-    let resolvedWorkspaceRoot = pathResolver.resolvePath(workspaceRoot)
-    let alreadyWrapped = existingArgv.first.map { pathResolver.resolvePath($0) } == resolvedMultiplexerPath
+    let resolvedMultiplexerPath = fileSystem.resolvePath(multiplexerExecutable)
+    let resolvedWorkspaceRoot = fileSystem.resolvePath(workspaceRoot)
+    let alreadyWrapped = existingArgv.first.map { fileSystem.resolvePath($0) } == resolvedMultiplexerPath
 
     if alreadyWrapped {
       guard force else {

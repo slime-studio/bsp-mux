@@ -23,7 +23,6 @@ final class FakeElectionEnvironment: ElectionEnvironment, @unchecked Sendable {
   private var connectResults: [ConnectResult]
   private var lockResults: [LockResult]
   private(set) var calls: [String] = []
-  private(set) var unlinkedPaths: [String] = []
 
   var listenResult: Result<ListeningHandle, ElectionError> = .success(ListeningHandle(fileDescriptor: 99))
   var detachSessionError: ElectionError?
@@ -55,11 +54,6 @@ final class FakeElectionEnvironment: ElectionEnvironment, @unchecked Sendable {
     case .contended: return nil
     case .failure(let error): throw error
     }
-  }
-
-  func unlinkIfExists(_ path: String) {
-    calls.append("unlink")
-    unlinkedPaths.append(path)
   }
 
   func listen(at socketPath: String) throws -> ListeningHandle {

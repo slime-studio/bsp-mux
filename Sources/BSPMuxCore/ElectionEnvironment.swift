@@ -20,9 +20,9 @@ public struct LockHandle: Sendable, Equatable {
   public init(fileDescriptor: Int32) { self.fileDescriptor = fileDescriptor }
 }
 
-/// The OS primitives `Election` needs, narrow enough to fake in unit tests. Every primitive
-/// here is used in exactly one place (the election), so unlike `FileSystemProviding` /
-/// `PathResolving` there's no benefit to splitting it further.
+/// The socket/lock/process primitives `Election` needs, narrow enough to fake in unit tests.
+/// File removal lives on `FileSystemProviding` instead, since deleting a stale socket file
+/// isn't election-specific.
 public protocol ElectionEnvironment: Sendable {
   /// Attempts to connect to the daemon's socket at `socketPath`. Returns `nil` if nothing is
   /// listening there yet (the socket path doesn't exist, or exists but is stale/refused) —
@@ -33,9 +33,6 @@ public protocol ElectionEnvironment: Sendable {
   /// `nil` if another process currently holds it — never blocks waiting for it to free up
   /// (see `Election` for why a blocking acquire would be wrong here).
   func acquireLockNonBlocking(atPath lockPath: String) throws -> LockHandle?
-
-  /// Removes `path` if present. Not an error if it doesn't exist.
-  func unlinkIfExists(_ path: String)
 
   /// Binds and starts listening on `socketPath`. Must only be called while holding the lock
   /// for that same project key, so a concurrent unlink/bind from another process can't race it.

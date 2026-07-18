@@ -9,8 +9,6 @@ import Glibc
 import Musl
 #endif
 
-// Needed for getuid() in ProjectPaths below; realpath(3) itself now lives in PathResolving.swift.
-
 /// Identifies a single (workspace, backend, toolchain) combination that should share one
 /// daemon + backend process. Two processes that compute the same `ProjectKey` are safe to
 /// share a backend; two that compute different keys must not.
@@ -33,12 +31,12 @@ public struct ProjectKey: Sendable, Equatable {
   ///     `Installer`, not derived from cwd — see `Installer` for why).
   ///   - backendArgv: The wrapped backend's argv (the portion after `--`), unresolved.
   ///   - environment: Injectable for testing; defaults to the real process environment.
-  ///   - pathResolver: Injectable for testing; defaults to real `realpath(3)` resolution.
+  ///   - fileSystem: Injectable for testing; defaults to real `realpath(3)` resolution.
   public init(
     workspaceRoot: String,
     backendArgv: [String],
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    pathResolver: PathResolving = RealPathResolver()
+    fileSystem: FileSystemProviding = RealFileSystem()
   ) {
     var hasher = SHA256()
 
@@ -46,8 +44,8 @@ public struct ProjectKey: Sendable, Equatable {
       hasher.update(data: Data((string + "\u{0}").utf8))
     }
 
-    feed(pathResolver.resolvePath(workspaceRoot))
-    for arg in ProjectKey.resolveArgv(backendArgv, using: pathResolver) {
+    feed(fileSystem.resolvePath(workspaceRoot))
+    for arg in ProjectKey.resolveArgv(backendArgv, using: fileSystem) {
       feed(arg)
     }
     for key in ProjectKey.environmentAllowlist.sorted() {
@@ -62,10 +60,10 @@ public struct ProjectKey: Sendable, Equatable {
   /// Resolves argv[0] (the backend executable) to a real path so e.g. a symlinked or
   /// PATH-relative backend doesn't produce a different key than an equivalent absolute one.
   /// Remaining args are passed through unresolved — they may not be paths at all.
-  static func resolveArgv(_ argv: [String], using pathResolver: PathResolving) -> [String] {
+  static func resolveArgv(_ argv: [String], using fileSystem: FileSystemProviding) -> [String] {
     guard let executable = argv.first else { return argv }
     var resolved = argv
-    resolved[0] = pathResolver.resolvePath(executable)
+    resolved[0] = fileSystem.resolvePath(executable)
     return resolved
   }
 }

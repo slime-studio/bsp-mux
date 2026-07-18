@@ -61,14 +61,6 @@ public struct RealElectionEnvironment: ElectionEnvironment {
     return nil
   }
 
-  public func unlinkIfExists(_ path: String) {
-    // ENOENT (already gone) and any other failure here are non-fatal: this is best-effort
-    // cleanup of a stale socket file, not a correctness-critical step in its own right — the
-    // caller only reaches here while holding the election lock, so no concurrent unlink/bind
-    // from another process can race it.
-    _ = unlink(path)
-  }
-
   public func listen(at socketPath: String) throws -> ListeningHandle {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw ElectionError.errno("socket", errno) }

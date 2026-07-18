@@ -36,27 +36,27 @@ import Testing
   }
 
   @Test func symlinkedBackendExecutableProducesSameKeyAsItsRealPath() {
-    let resolver = FakePathResolver(["/usr/bin/backend-symlink": "/opt/toolchain/backend"])
+    let fs = InMemoryFileSystem(resolvedPaths: ["/usr/bin/backend-symlink": "/opt/toolchain/backend"])
     let a = ProjectKey(
       workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend-symlink", "serve"],
-      environment: [:], pathResolver: resolver
+      environment: [:], fileSystem: fs
     )
     let b = ProjectKey(
       workspaceRoot: "/tmp/project", backendArgv: ["/opt/toolchain/backend", "serve"],
-      environment: [:], pathResolver: resolver
+      environment: [:], fileSystem: fs
     )
     #expect(a == b)
   }
 
   @Test func symlinkedWorkspaceRootProducesSameKeyAsItsRealPath() {
-    let resolver = FakePathResolver(["/tmp/symlinked-project": "/tmp/real-project"])
+    let fs = InMemoryFileSystem(resolvedPaths: ["/tmp/symlinked-project": "/tmp/real-project"])
     let a = ProjectKey(
       workspaceRoot: "/tmp/symlinked-project", backendArgv: ["/usr/bin/backend"],
-      environment: [:], pathResolver: resolver
+      environment: [:], fileSystem: fs
     )
     let b = ProjectKey(
       workspaceRoot: "/tmp/real-project", backendArgv: ["/usr/bin/backend"],
-      environment: [:], pathResolver: resolver
+      environment: [:], fileSystem: fs
     )
     #expect(a == b)
   }
@@ -64,14 +64,14 @@ import Testing
   @Test func onlyArgvZeroIsResolvedRemainingArgsPassThroughVerbatim() {
     // If a non-executable arg were (incorrectly) run through the resolver, this would
     // produce a different key than the same argv against the real resolver.
-    let resolver = FakePathResolver(["--config": "/should/never/be/consulted"])
+    let fs = InMemoryFileSystem(resolvedPaths: ["--config": "/should/never/be/consulted"])
     let a = ProjectKey(
       workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend", "--config"],
-      environment: [:], pathResolver: resolver
+      environment: [:], fileSystem: fs
     )
     let b = ProjectKey(
       workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend", "--config"],
-      environment: [:], pathResolver: FakePathResolver()
+      environment: [:], fileSystem: InMemoryFileSystem()
     )
     #expect(a == b)
   }

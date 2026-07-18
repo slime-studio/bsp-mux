@@ -322,10 +322,10 @@ POSIX equivalent exists.
 
 Implemented and tested: `ProjectKey`/`ProjectPaths` (key derivation, socket
 path budget, meta round-trip), `Installer` (argv-splice `install`,
-idempotency, `--force` unwrap/rewrap), both backed by injectable
-`FileSystemProviding`/`PathResolving` seams so disk I/O and `realpath(3)`
-resolution are fakeable in tests. `Election` (connect/flock race, daemon
-bootstrap) is implemented behind an `ElectionEnvironment` seam and
+idempotency, `--force` unwrap/rewrap), both backed by an injectable
+`FileSystemProviding` seam so disk I/O and `realpath(3)` resolution are
+fakeable in tests. `Election` (connect/flock race, daemon bootstrap) is
+implemented behind an `ElectionEnvironment` seam and
 unit-tested against a fake for its decision logic; its cross-process
 guarantees (no split-brain on a cold-start race, no duplicate daemon if a
 live daemon's socket is deleted out from under it, prompt takeover after a

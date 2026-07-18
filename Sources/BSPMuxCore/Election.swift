@@ -12,38 +12,32 @@ public enum ElectionOutcome: Sendable, Equatable {
 /// The connect/flock race described in DESIGN.md's "Election race": every process launched
 /// for a project either finds a live daemon and becomes a relay, or becomes the daemon itself.
 ///
-/// The lock is acquired non-blocking, never blocking, on the loser's side, and — once won —
-/// held for the daemon's entire lifetime rather than just across the critical section. Both
-/// choices are load-bearing, not incidental:
-///
-/// - A *blocking* acquire would be correct for the instant of the race but wrong for
-///   everything after: since the winner holds the lock for its whole life, a blocking loser
-///   would hang until the daemon exits, not until it finishes `listen()` — deadlocking the
-///   project's primary scenario (a second editor window opened while the first is still
-///   running).
-/// - Holding the lock for the daemon's whole life (rather than releasing right after
-///   `listen()`) turns "lock held" into an always-valid "a daemon is alive right now" signal,
-///   not just "someone won the initial race." That matters because the socket file itself can
-///   be invalidated out from under a live daemon (e.g. external cleanup under `/tmp`) without
-///   the daemon knowing; a contender that finds the socket gone but the lock still held knows
-///   definitively not to start a second daemon, and keeps polling `connect()` instead. It also
-///   means acquiring the lock is itself sufficient proof no live daemon exists — a live one
-///   would still be holding it — so there's no need to double-check `connect()` again
-///   afterward.
+/// The lock is acquired non-blocking on the loser's side and, once won, held for the daemon's
+/// entire lifetime rather than just across the critical section. A blocking acquire would
+/// deadlock the moment a second editor window opens while the first is still running, since
+/// the winner never releases the lock. Holding it for the daemon's whole life also makes
+/// "lock held" an always-valid liveness signal (not just "someone won the initial race"),
+/// which matters if the socket file itself gets deleted out from under a live daemon — a
+/// contender then knows not to start a second one and keeps polling `connect()` instead. It's
+/// also why acquiring the lock is sufficient proof no live daemon exists, with no need to
+/// double-check `connect()` again afterward.
 public struct Election: Sendable {
   private let paths: ProjectPaths
   private let environment: ElectionEnvironment
+  private let fileSystem: FileSystemProviding
   private let pollInterval: TimeInterval
   private let sleep: @Sendable (TimeInterval) -> Void
 
   public init(
     paths: ProjectPaths,
     environment: ElectionEnvironment = RealElectionEnvironment(),
+    fileSystem: FileSystemProviding = RealFileSystem(),
     pollInterval: TimeInterval = 0.02,
     sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
   ) {
     self.paths = paths
     self.environment = environment
+    self.fileSystem = fileSystem
     self.pollInterval = pollInterval
     self.sleep = sleep
   }
@@ -55,7 +49,7 @@ public struct Election: Sendable {
       }
 
       if let lock = try environment.acquireLockNonBlocking(atPath: paths.lockPath) {
-        environment.unlinkIfExists(paths.socketPath)
+        fileSystem.remove(atPath: paths.socketPath)
         // bind()+listen() before spawning the backend, so racing connects can queue instead
         // of serializing behind backend startup latency (spawning happens in the caller).
         let listening = try environment.listen(at: paths.socketPath)

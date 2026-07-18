@@ -34,13 +34,14 @@ import Testing
       lockResults: [.acquired(lock)]
     )
     env.listenResult = .success(listening)
-    let election = Election(paths: Self.paths, environment: env, sleep: { _ in })
+    let fs = InMemoryFileSystem()
+    let election = Election(paths: Self.paths, environment: env, fileSystem: fs, sleep: { _ in })
 
     let outcome = try election.run()
 
     #expect(outcome == .daemon(listening, lock))
-    #expect(env.calls == ["connect", "acquireLock", "unlink", "listen", "ignoreSIGPIPE", "detachSession"])
-    #expect(env.unlinkedPaths == [Self.paths.socketPath])
+    #expect(env.calls == ["connect", "acquireLock", "listen", "ignoreSIGPIPE", "detachSession"])
+    #expect(fs.removedPaths == [Self.paths.socketPath])
   }
 
   @Test func connectFailsAndLockContendedThenConnectSucceedsBecomesRelay() throws {
@@ -70,12 +71,14 @@ import Testing
       lockResults: [.contended, .acquired(lock)]
     )
     env.listenResult = .success(listening)
-    let election = Election(paths: Self.paths, environment: env, sleep: Self.noOpSleep(callCount: callCount))
+    let fs = InMemoryFileSystem()
+    let election = Election(paths: Self.paths, environment: env, fileSystem: fs, sleep: Self.noOpSleep(callCount: callCount))
 
     let outcome = try election.run()
 
     #expect(outcome == .daemon(listening, lock))
-    #expect(env.calls == ["connect", "acquireLock", "connect", "acquireLock", "unlink", "listen", "ignoreSIGPIPE", "detachSession"])
+    #expect(env.calls == ["connect", "acquireLock", "connect", "acquireLock", "listen", "ignoreSIGPIPE", "detachSession"])
+    #expect(fs.removedPaths == [Self.paths.socketPath])
     #expect(callCount.value == 1)
   }
 
@@ -106,13 +109,15 @@ import Testing
       lockResults: [.acquired(LockHandle(fileDescriptor: 3))]
     )
     env.listenResult = .failure(ElectionError(description: "bind failed: address in use"))
-    let election = Election(paths: Self.paths, environment: env, sleep: { _ in })
+    let fs = InMemoryFileSystem()
+    let election = Election(paths: Self.paths, environment: env, fileSystem: fs, sleep: { _ in })
 
     #expect(throws: ElectionError.self) {
       try election.run()
     }
     // Still unlinked the stale socket before the failing listen() attempt.
-    #expect(env.calls == ["connect", "acquireLock", "unlink", "listen"])
+    #expect(env.calls == ["connect", "acquireLock", "listen"])
+    #expect(fs.removedPaths == [Self.paths.socketPath])
   }
 
   @Test func detachSessionErrorPropagatesAfterListenAndIgnoreSIGPIPE() {
@@ -126,7 +131,7 @@ import Testing
     #expect(throws: ElectionError.self) {
       try election.run()
     }
-    #expect(env.calls == ["connect", "acquireLock", "unlink", "listen", "ignoreSIGPIPE", "detachSession"])
+    #expect(env.calls == ["connect", "acquireLock", "listen", "ignoreSIGPIPE", "detachSession"])
   }
 }
 

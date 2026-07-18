@@ -8,13 +8,6 @@ import Testing
   static let multiplexerExecutable = "/test-workspace-xyz/bin/bsp-mux"
   static let buildServerJSONPath = "\(workspaceRoot)/buildServer.json"
 
-  // An identity FakePathResolver rather than the real one: keeps these tests deterministic
-  // regardless of what happens to exist on the machine running the tests, and independent
-  // of Installer.install(...)'s specific realpath(3) fallback behavior.
-  static func makeInstaller(fileSystem: InMemoryFileSystem, pathResolver: PathResolving = FakePathResolver()) -> Installer {
-    Installer(fileSystem: fileSystem, pathResolver: pathResolver)
-  }
-
   static func sampleOriginalJSON(argv: [String] = ["/usr/local/bin/sourcekit-xcode-bsp", "serve"]) -> [String: Any] {
     [
       "name": "sourcekit-xcode-bsp",
@@ -39,7 +32,7 @@ import Testing
   @Test func installWrapsExistingArgvAndPreservesOtherFields() throws {
     let fs = InMemoryFileSystem()
     try Self.writeSample(to: fs)
-    let installer = Self.makeInstaller(fileSystem: fs)
+    let installer = Installer(fileSystem: fs)
 
     let result = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
     #expect(result.changed)
@@ -64,7 +57,7 @@ import Testing
   @Test func installIsIdempotentWithoutForce() throws {
     let fs = InMemoryFileSystem()
     try Self.writeSample(to: fs)
-    let installer = Self.makeInstaller(fileSystem: fs)
+    let installer = Installer(fileSystem: fs)
 
     let first = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
     #expect(first.changed)
@@ -77,7 +70,7 @@ import Testing
   @Test func installWithForceUnwrapsBeforeRewrappingInsteadOfNesting() throws {
     let fs = InMemoryFileSystem()
     try Self.writeSample(to: fs)
-    let installer = Self.makeInstaller(fileSystem: fs)
+    let installer = Installer(fileSystem: fs)
 
     let first = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
     let second = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable, force: true)
@@ -93,14 +86,13 @@ import Testing
     // argv[0] is a symlink pointing at the real multiplexer path; only a path resolver
     // (not string equality) can tell these name the same binary.
     let symlinkedMultiplexerPath = "/usr/local/bin/bsp-mux-symlink"
-    let resolver = FakePathResolver([symlinkedMultiplexerPath: Self.multiplexerExecutable])
 
-    let fs = InMemoryFileSystem()
+    let fs = InMemoryFileSystem(resolvedPaths: [symlinkedMultiplexerPath: Self.multiplexerExecutable])
     try Self.writeSample(
       to: fs,
       argv: [symlinkedMultiplexerPath, "--workspace-root", Self.workspaceRoot, "--", "/usr/local/bin/sourcekit-xcode-bsp", "serve"]
     )
-    let installer = Self.makeInstaller(fileSystem: fs, pathResolver: resolver)
+    let installer = Installer(fileSystem: fs)
 
     let result = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
     #expect(!result.changed)
@@ -108,7 +100,7 @@ import Testing
 
   @Test func installThrowsWhenBuildServerJSONMissing() {
     let fs = InMemoryFileSystem()
-    let installer = Self.makeInstaller(fileSystem: fs)
+    let installer = Installer(fileSystem: fs)
     #expect(throws: Installer.Error.self) {
       try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
     }
@@ -119,7 +111,7 @@ import Testing
     var json = Self.sampleOriginalJSON()
     json.removeValue(forKey: "argv")
     try fs.write(try JSONSerialization.data(withJSONObject: json), toPath: Self.buildServerJSONPath)
-    let installer = Self.makeInstaller(fileSystem: fs)
+    let installer = Installer(fileSystem: fs)
 
     #expect(throws: Installer.Error.self) {
       try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
@@ -129,7 +121,7 @@ import Testing
   @Test func installThrowsWhenArgvEmpty() throws {
     let fs = InMemoryFileSystem()
     try Self.writeSample(to: fs, argv: [])
-    let installer = Self.makeInstaller(fileSystem: fs)
+    let installer = Installer(fileSystem: fs)
 
     #expect(throws: Installer.Error.self) {
       try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
