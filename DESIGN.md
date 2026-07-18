@@ -167,16 +167,48 @@ detect a truncated-hash collision instead of silently trusting it.
 
 ### Election race
 
-`connect()` → on failure, `flock(LOCK_EX)` a companion lockfile (the kernel
-releases this automatically on crash or normal exit — no manual staleness
-detection needed, unlike a PID-in-lockfile scheme) → double-check
-`connect()` again (another process may have finished electing while this
-one was acquiring the lock) → else become the daemon: unlink a stale socket
-file if present (`bind()` fails with `EADDRINUSE` on an existing path
-regardless of whether anything's listening), `bind()`+`listen()` **before**
-spawning the backend so racing connects can queue instead of serializing
-behind backend startup latency, ignore `SIGPIPE`, detach the session
-(`setsid()`), and hold the flock for the daemon's entire lifetime.
+`connect()` → succeeds → this process is a relay, done. This is the common
+case (every editor window after the first) and never touches the lockfile
+at all.
+
+`connect()` fails (`ECONNREFUSED`/`ENOENT`; any other errno is a real error,
+not an absence, and propagates) → loop:
+
+1. `connect()` again → succeeds → relay, done.
+2. Else, attempt `flock(LOCK_EX | LOCK_NB)` (non-blocking) on a companion
+   lockfile.
+   - **Acquired** → become the daemon: unlink a stale socket file if
+     present (`bind()` fails with `EADDRINUSE` on an existing path
+     regardless of whether anything's listening), `bind()`+`listen()`
+     **before** spawning the backend so racing connects can queue instead
+     of serializing behind backend startup latency, ignore `SIGPIPE`,
+     detach the session (`setsid()`) — and **hold the flock for the
+     daemon's entire lifetime**, released only by the kernel on crash or
+     normal exit (no manual staleness detection needed, unlike a
+     PID-in-lockfile scheme).
+   - **Not acquired** → another process is either mid-election or is
+     already the live daemon; sleep briefly and loop again.
+
+The lock is deliberately **non-blocking** on the loser's side, not a
+blocking `flock(LOCK_EX)`. A blocking acquire would be correct at the
+instant of the race but wrong for the rest of the daemon's life: since the
+daemon holds the lock until it exits, a blocking loser would hang for the
+daemon's *entire remaining lifetime* instead of promptly reconnecting once
+the daemon finishes `listen()` — a design that looks fine in isolation but
+deadlocks the project's primary scenario (a second editor window opened
+while the first is still running). The non-blocking-plus-poll form avoids
+that while preserving the reason the lock is held for the daemon's whole
+life in the first place: it turns "lock held" into an always-valid signal
+for "a daemon is alive right now," not just "someone won the initial race."
+That distinction matters because the socket file itself can be invalidated
+out from under a live daemon (e.g. something external cleaning up under
+`/tmp` — see below) without the daemon knowing; a contender that finds the
+socket gone but the lock still held knows definitively not to start a
+second one, and keeps polling `connect()` instead. Holding the lock for the
+daemon's lifetime also removes the need to double-check `connect()` again
+right after acquiring it: since a live daemon would still be holding the
+lock, successfully acquiring it non-blocking is *by itself* proof no live
+daemon currently exists — there's nothing left to double-check.
 
 If the backend process crashes or its connection errors out mid-session:
 fail all in-flight requests across every connected session, close
@@ -290,11 +322,19 @@ POSIX equivalent exists.
 
 Implemented and tested: `ProjectKey`/`ProjectPaths` (key derivation, socket
 path budget, meta round-trip), `Installer` (argv-splice `install`,
-idempotency, `--force` unwrap/rewrap).
+idempotency, `--force` unwrap/rewrap), both backed by injectable
+`FileSystemProviding`/`PathResolving` seams so disk I/O and `realpath(3)`
+resolution are fakeable in tests. `Election` (connect/flock race, daemon
+bootstrap) is implemented behind an `ElectionEnvironment` seam and
+unit-tested against a fake for its decision logic; its cross-process
+guarantees (no split-brain on a cold-start race, no duplicate daemon if a
+live daemon's socket is deleted out from under it, prompt takeover after a
+crash) were verified once by hand against the real POSIX implementation but
+are not yet in the automated suite — see Verification below.
 
-Not yet implemented: `Election`, `Relay`, `ClientSession`, `Daemon`,
-`NotificationRouter`, the real `bsp-mux` CLI entry point,
-`fake-bsp-backend`, and the integration test suite.
+Not yet implemented: `Relay`, `ClientSession`, `Daemon`, `NotificationRouter`,
+the real `bsp-mux` CLI entry point, `fake-bsp-backend`, and the integration
+test suite.
 
 ## Verification
 
