@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 public enum ElectionOutcome: Sendable, Equatable {
@@ -25,24 +26,22 @@ public struct Election: Sendable {
   private let paths: ProjectPaths
   private let environment: ElectionEnvironment
   private let fileSystem: FileSystemProviding
-  private let pollInterval: TimeInterval
-  private let sleep: @Sendable (TimeInterval) -> Void
+  private let pollInterval: Duration
+  @Dependency(\.continuousClock) private var clock
 
   public init(
     paths: ProjectPaths,
     environment: ElectionEnvironment = RealElectionEnvironment(),
     fileSystem: FileSystemProviding = RealFileSystem(),
-    pollInterval: TimeInterval = 0.02,
-    sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    pollInterval: Duration = .milliseconds(20)
   ) {
     self.paths = paths
     self.environment = environment
     self.fileSystem = fileSystem
     self.pollInterval = pollInterval
-    self.sleep = sleep
   }
 
-  public func run() throws -> ElectionOutcome {
+  public func run() async throws -> ElectionOutcome {
     while true {
       if let connection = try environment.connect(to: paths.socketPath) {
         return .relay(connection)
@@ -61,7 +60,7 @@ public struct Election: Sendable {
       // Neither connected nor won the lock: another process is either mid-election or is
       // already the live daemon (about to finish `listen()`), or the previous lock holder
       // died mid-startup and will free up on the next iteration. Poll rather than block.
-      sleep(pollInterval)
+      try await clock.sleep(for: pollInterval)
     }
   }
 }

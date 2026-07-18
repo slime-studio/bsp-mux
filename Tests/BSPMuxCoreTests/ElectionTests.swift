@@ -1,3 +1,5 @@
+import Clocks
+import Dependencies
 import Foundation
 import Testing
 
@@ -9,24 +11,28 @@ import Testing
     baseDirectory: "/tmp/bsp-mux-test-election"
   )
 
-  /// A sleep that just records how many times it was asked to wait, instead of actually
-  /// waiting — keeps the poll-loop tests instant.
-  static func noOpSleep(callCount: UnsafeSendableBox<Int>) -> @Sendable (TimeInterval) -> Void {
-    { _ in callCount.value += 1 }
+  /// Runs `election.run()` with an `ImmediateClock` standing in for the real one, so a test
+  /// that reaches the poll loop resolves every `sleep` instantly instead of actually waiting.
+  static func run(_ election: Election) async throws -> ElectionOutcome {
+    try await withDependencies {
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      try await election.run()
+    }
   }
 
-  @Test func immediateConnectSuccessBecomesRelayWithoutTouchingTheLock() throws {
+  @Test func immediateConnectSuccessBecomesRelayWithoutTouchingTheLock() async throws {
     let handle = ConnectionHandle(fileDescriptor: 7)
     let env = FakeElectionEnvironment(connectResults: [.success(handle)])
-    let election = Election(paths: Self.paths, environment: env, sleep: { _ in })
+    let election = Election(paths: Self.paths, environment: env)
 
-    let outcome = try election.run()
+    let outcome = try await Self.run(election)
 
     #expect(outcome == .relay(handle))
     #expect(env.calls == ["connect"])
   }
 
-  @Test func connectFailsThenLockAcquiredBecomesDaemonInCorrectOrder() throws {
+  @Test func connectFailsThenLockAcquiredBecomesDaemonInCorrectOrder() async throws {
     let lock = LockHandle(fileDescriptor: 3)
     let listening = ListeningHandle(fileDescriptor: 4)
     let env = FakeElectionEnvironment(
@@ -35,109 +41,98 @@ import Testing
     )
     env.listenResult = .success(listening)
     let fs = InMemoryFileSystem()
-    let election = Election(paths: Self.paths, environment: env, fileSystem: fs, sleep: { _ in })
+    let election = Election(paths: Self.paths, environment: env, fileSystem: fs)
 
-    let outcome = try election.run()
+    let outcome = try await Self.run(election)
 
     #expect(outcome == .daemon(listening, lock))
     #expect(env.calls == ["connect", "acquireLock", "listen", "ignoreSIGPIPE", "detachSession"])
     #expect(fs.removedPaths == [Self.paths.socketPath])
   }
 
-  @Test func connectFailsAndLockContendedThenConnectSucceedsBecomesRelay() throws {
+  @Test func connectFailsAndLockContendedThenConnectSucceedsBecomesRelay() async throws {
     let handle = ConnectionHandle(fileDescriptor: 9)
-    let callCount = UnsafeSendableBox(0)
     let env = FakeElectionEnvironment(
       connectResults: [.absent, .success(handle)],
       lockResults: [.contended]
     )
-    let election = Election(paths: Self.paths, environment: env, sleep: Self.noOpSleep(callCount: callCount))
+    let election = Election(paths: Self.paths, environment: env)
 
-    let outcome = try election.run()
+    let outcome = try await Self.run(election)
 
     #expect(outcome == .relay(handle))
     #expect(env.calls == ["connect", "acquireLock", "connect"])
-    #expect(callCount.value == 1)
   }
 
-  @Test func connectFailsAndLockContendedThenLockFreesUpBecomesDaemon() throws {
+  @Test func connectFailsAndLockContendedThenLockFreesUpBecomesDaemon() async throws {
     // Models the previous lock holder dying mid-startup: still no live daemon to connect to
     // on the second attempt, but the lock is free now.
     let lock = LockHandle(fileDescriptor: 5)
     let listening = ListeningHandle(fileDescriptor: 6)
-    let callCount = UnsafeSendableBox(0)
     let env = FakeElectionEnvironment(
       connectResults: [.absent, .absent],
       lockResults: [.contended, .acquired(lock)]
     )
     env.listenResult = .success(listening)
     let fs = InMemoryFileSystem()
-    let election = Election(paths: Self.paths, environment: env, fileSystem: fs, sleep: Self.noOpSleep(callCount: callCount))
+    let election = Election(paths: Self.paths, environment: env, fileSystem: fs)
 
-    let outcome = try election.run()
+    let outcome = try await Self.run(election)
 
     #expect(outcome == .daemon(listening, lock))
     #expect(env.calls == ["connect", "acquireLock", "connect", "acquireLock", "listen", "ignoreSIGPIPE", "detachSession"])
     #expect(fs.removedPaths == [Self.paths.socketPath])
-    #expect(callCount.value == 1)
   }
 
-  @Test func nonAbsenceConnectErrorPropagatesRatherThanBeingTreatedAsNoDaemon() {
+  @Test func nonAbsenceConnectErrorPropagatesRatherThanBeingTreatedAsNoDaemon() async {
     let env = FakeElectionEnvironment(connectResults: [.failure(ElectionError(description: "connect failed: permission denied"))])
-    let election = Election(paths: Self.paths, environment: env, sleep: { _ in })
+    let election = Election(paths: Self.paths, environment: env)
 
-    #expect(throws: ElectionError.self) {
-      try election.run()
+    await #expect(throws: ElectionError.self) {
+      try await Self.run(election)
     }
   }
 
-  @Test func lockAcquireErrorPropagates() {
+  @Test func lockAcquireErrorPropagates() async {
     let env = FakeElectionEnvironment(
       connectResults: [.absent],
       lockResults: [.failure(ElectionError(description: "flock failed: no locks available"))]
     )
-    let election = Election(paths: Self.paths, environment: env, sleep: { _ in })
+    let election = Election(paths: Self.paths, environment: env)
 
-    #expect(throws: ElectionError.self) {
-      try election.run()
+    await #expect(throws: ElectionError.self) {
+      try await Self.run(election)
     }
   }
 
-  @Test func listenErrorPropagatesAfterAcquiringLock() {
+  @Test func listenErrorPropagatesAfterAcquiringLock() async throws {
     let env = FakeElectionEnvironment(
       connectResults: [.absent],
       lockResults: [.acquired(LockHandle(fileDescriptor: 3))]
     )
     env.listenResult = .failure(ElectionError(description: "bind failed: address in use"))
     let fs = InMemoryFileSystem()
-    let election = Election(paths: Self.paths, environment: env, fileSystem: fs, sleep: { _ in })
+    let election = Election(paths: Self.paths, environment: env, fileSystem: fs)
 
-    #expect(throws: ElectionError.self) {
-      try election.run()
+    await #expect(throws: ElectionError.self) {
+      try await Self.run(election)
     }
     // Still unlinked the stale socket before the failing listen() attempt.
     #expect(env.calls == ["connect", "acquireLock", "listen"])
     #expect(fs.removedPaths == [Self.paths.socketPath])
   }
 
-  @Test func detachSessionErrorPropagatesAfterListenAndIgnoreSIGPIPE() {
+  @Test func detachSessionErrorPropagatesAfterListenAndIgnoreSIGPIPE() async throws {
     let env = FakeElectionEnvironment(
       connectResults: [.absent],
       lockResults: [.acquired(LockHandle(fileDescriptor: 3))]
     )
     env.detachSessionError = ElectionError(description: "setsid failed: unexpected errno")
-    let election = Election(paths: Self.paths, environment: env, sleep: { _ in })
+    let election = Election(paths: Self.paths, environment: env)
 
-    #expect(throws: ElectionError.self) {
-      try election.run()
+    await #expect(throws: ElectionError.self) {
+      try await Self.run(election)
     }
     #expect(env.calls == ["connect", "acquireLock", "listen", "ignoreSIGPIPE", "detachSession"])
   }
-}
-
-/// Plain reference box for counting calls from a `@Sendable` closure in tests. Not
-/// thread-safe, which is fine: `Election.run()` calls `sleep` synchronously on one thread.
-final class UnsafeSendableBox<T>: @unchecked Sendable {
-  var value: T
-  init(_ value: T) { self.value = value }
 }

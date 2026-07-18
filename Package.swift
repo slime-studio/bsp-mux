@@ -13,6 +13,8 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/swiftlang/swift-tools-protocols.git", exact: "0.0.10"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+    .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.0.0"),
+    .package(url: "https://github.com/pointfreeco/swift-clocks.git", from: "1.0.0"),
   ],
   targets: [
     .target(
@@ -22,6 +24,8 @@ let package = Package(
         .product(name: "LanguageServerProtocolTransport", package: "swift-tools-protocols"),
         .product(name: "SKLogging", package: "swift-tools-protocols"),
         .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "Dependencies", package: "swift-dependencies"),
+        .product(name: "Clocks", package: "swift-clocks"),
       ]
     ),
     .executableTarget(
@@ -37,7 +41,10 @@ let package = Package(
     ),
     .testTarget(
       name: "BSPMuxCoreTests",
-      dependencies: ["BSPMuxCore"]
+      dependencies: [
+        "BSPMuxCore",
+        .product(name: "Clocks", package: "swift-clocks"),
+      ]
     ),
     .testTarget(
       name: "BSPMuxIntegrationTests",
