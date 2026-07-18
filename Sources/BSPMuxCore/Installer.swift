@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 /// Wraps a project's existing `buildServer.json` so `sourcekit-lsp` launches our multiplexer
@@ -15,11 +16,9 @@ public struct Installer {
     public let description: String
   }
 
-  private let fileSystem: FileSystemProviding
+  @Dependency(\.fileSystem) private var fileSystem
 
-  public init(fileSystem: FileSystemProviding = RealFileSystem()) {
-    self.fileSystem = fileSystem
-  }
+  public init() {}
 
   /// - Parameters:
   ///   - workspaceRoot: Absolute path to the directory containing `buildServer.json`.

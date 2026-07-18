@@ -1,4 +1,5 @@
 import Crypto
+import Dependencies
 import Foundation
 
 #if canImport(Darwin)
@@ -31,13 +32,15 @@ public struct ProjectKey: Sendable, Equatable {
   ///     `Installer`, not derived from cwd — see `Installer` for why).
   ///   - backendArgv: The wrapped backend's argv (the portion after `--`), unresolved.
   ///   - environment: Injectable for testing; defaults to the real process environment.
-  ///   - fileSystem: Injectable for testing; defaults to real `realpath(3)` resolution.
+  ///
+  /// `realpath(3)` resolution comes from `@Dependency(\.fileSystem)`; override it in tests via
+  /// `withDependencies`.
   public init(
     workspaceRoot: String,
     backendArgv: [String],
-    environment: [String: String] = ProcessInfo.processInfo.environment,
-    fileSystem: FileSystemProviding = RealFileSystem()
+    environment: [String: String] = ProcessInfo.processInfo.environment
   ) {
+    @Dependency(\.fileSystem) var fileSystem
     var hasher = SHA256()
 
     func feed(_ string: String) {
