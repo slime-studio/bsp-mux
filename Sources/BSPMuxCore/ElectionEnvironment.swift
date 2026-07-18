@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 /// A connected socket, owned by whichever process lost the election and became a relay.
@@ -50,5 +51,16 @@ public struct ElectionError: Swift.Error, CustomStringConvertible, Equatable {
 
   public init(description: String) {
     self.description = description
+  }
+}
+
+extension DependencyValues {
+  public var electionEnvironment: any ElectionEnvironment {
+    get { self[ElectionEnvironmentKey.self] }
+    set { self[ElectionEnvironmentKey.self] = newValue }
+  }
+
+  private enum ElectionEnvironmentKey: DependencyKey {
+    static let liveValue: any ElectionEnvironment = RealElectionEnvironment()
   }
 }

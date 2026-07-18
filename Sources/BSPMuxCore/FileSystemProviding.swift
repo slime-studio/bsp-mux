@@ -1,3 +1,4 @@
+import Dependencies
 import Foundation
 
 #if canImport(Darwin)
@@ -46,5 +47,16 @@ public struct RealFileSystem: FileSystemProviding {
     // lookup rather than an absolute path). Fall back to lexical standardization rather
     // than failing key derivation outright.
     return URL(fileURLWithPath: path).standardizedFileURL.path
+  }
+}
+
+extension DependencyValues {
+  public var fileSystem: any FileSystemProviding {
+    get { self[FileSystemProvidingKey.self] }
+    set { self[FileSystemProvidingKey.self] = newValue }
+  }
+
+  private enum FileSystemProvidingKey: DependencyKey {
+    static let liveValue: any FileSystemProviding = RealFileSystem()
   }
 }

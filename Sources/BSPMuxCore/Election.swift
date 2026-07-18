@@ -24,20 +24,16 @@ public enum ElectionOutcome: Sendable, Equatable {
 /// double-check `connect()` again afterward.
 public struct Election: Sendable {
   private let paths: ProjectPaths
-  private let environment: ElectionEnvironment
-  private let fileSystem: FileSystemProviding
   private let pollInterval: Duration
   @Dependency(\.continuousClock) private var clock
+  @Dependency(\.electionEnvironment) private var environment
+  @Dependency(\.fileSystem) private var fileSystem
 
   public init(
     paths: ProjectPaths,
-    environment: ElectionEnvironment = RealElectionEnvironment(),
-    fileSystem: FileSystemProviding = RealFileSystem(),
     pollInterval: Duration = .milliseconds(20)
   ) {
     self.paths = paths
-    self.environment = environment
-    self.fileSystem = fileSystem
     self.pollInterval = pollInterval
   }
 
