@@ -31,15 +31,21 @@ public struct ProjectKey: Sendable, Equatable {
   ///     `Installer`, not derived from cwd — see `Installer` for why).
   ///   - backendArgv: The wrapped backend's argv (the portion after `--`), unresolved.
   ///   - environment: Injectable for testing; defaults to the real process environment.
-  public init(workspaceRoot: String, backendArgv: [String], environment: [String: String] = ProcessInfo.processInfo.environment) {
+  ///   - fileSystem: Injectable for testing; defaults to real `realpath(3)` resolution.
+  public init(
+    workspaceRoot: String,
+    backendArgv: [String],
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    fileSystem: FileSystemProviding = RealFileSystem()
+  ) {
     var hasher = SHA256()
 
     func feed(_ string: String) {
       hasher.update(data: Data((string + "\u{0}").utf8))
     }
 
-    feed(ProjectKey.resolvePath(workspaceRoot))
-    for arg in ProjectKey.resolveArgv(backendArgv) {
+    feed(fileSystem.resolvePath(workspaceRoot))
+    for arg in ProjectKey.resolveArgv(backendArgv, using: fileSystem) {
       feed(arg)
     }
     for key in ProjectKey.environmentAllowlist.sorted() {
@@ -54,22 +60,11 @@ public struct ProjectKey: Sendable, Equatable {
   /// Resolves argv[0] (the backend executable) to a real path so e.g. a symlinked or
   /// PATH-relative backend doesn't produce a different key than an equivalent absolute one.
   /// Remaining args are passed through unresolved — they may not be paths at all.
-  static func resolveArgv(_ argv: [String]) -> [String] {
+  static func resolveArgv(_ argv: [String], using fileSystem: FileSystemProviding) -> [String] {
     guard let executable = argv.first else { return argv }
     var resolved = argv
-    resolved[0] = resolvePath(executable)
+    resolved[0] = fileSystem.resolvePath(executable)
     return resolved
-  }
-
-  static func resolvePath(_ path: String) -> String {
-    if let cResolved = realpath(path, nil) {
-      defer { free(cResolved) }
-      return String(cString: cResolved)
-    }
-    // realpath(3) fails if the path doesn't exist yet (e.g. a backend found via PATH
-    // lookup rather than an absolute path). Fall back to lexical standardization rather
-    // than failing key derivation outright.
-    return URL(fileURLWithPath: path).standardizedFileURL.path
   }
 }
 

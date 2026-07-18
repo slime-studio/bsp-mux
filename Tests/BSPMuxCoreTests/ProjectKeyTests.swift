@@ -35,6 +35,47 @@ import Testing
     #expect(a == b)
   }
 
+  @Test func symlinkedBackendExecutableProducesSameKeyAsItsRealPath() {
+    let fs = InMemoryFileSystem(resolvedPaths: ["/usr/bin/backend-symlink": "/opt/toolchain/backend"])
+    let a = ProjectKey(
+      workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend-symlink", "serve"],
+      environment: [:], fileSystem: fs
+    )
+    let b = ProjectKey(
+      workspaceRoot: "/tmp/project", backendArgv: ["/opt/toolchain/backend", "serve"],
+      environment: [:], fileSystem: fs
+    )
+    #expect(a == b)
+  }
+
+  @Test func symlinkedWorkspaceRootProducesSameKeyAsItsRealPath() {
+    let fs = InMemoryFileSystem(resolvedPaths: ["/tmp/symlinked-project": "/tmp/real-project"])
+    let a = ProjectKey(
+      workspaceRoot: "/tmp/symlinked-project", backendArgv: ["/usr/bin/backend"],
+      environment: [:], fileSystem: fs
+    )
+    let b = ProjectKey(
+      workspaceRoot: "/tmp/real-project", backendArgv: ["/usr/bin/backend"],
+      environment: [:], fileSystem: fs
+    )
+    #expect(a == b)
+  }
+
+  @Test func onlyArgvZeroIsResolvedRemainingArgsPassThroughVerbatim() {
+    // If a non-executable arg were (incorrectly) run through the resolver, this would
+    // produce a different key than the same argv against the real resolver.
+    let fs = InMemoryFileSystem(resolvedPaths: ["--config": "/should/never/be/consulted"])
+    let a = ProjectKey(
+      workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend", "--config"],
+      environment: [:], fileSystem: fs
+    )
+    let b = ProjectKey(
+      workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend", "--config"],
+      environment: [:], fileSystem: InMemoryFileSystem()
+    )
+    #expect(a == b)
+  }
+
   @Test func shortHashIsPrefixOfFullHash() {
     let key = ProjectKey(workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend"], environment: [:])
     #expect(key.fullHash.count == 64)

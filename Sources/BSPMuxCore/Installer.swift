@@ -50,9 +50,9 @@ public struct Installer {
       throw Error(description: "\(buildServerJSONPath) has no non-empty 'argv' array")
     }
 
-    let resolvedMultiplexerPath = ProjectKey.resolvePath(multiplexerExecutable)
-    let resolvedWorkspaceRoot = ProjectKey.resolvePath(workspaceRoot)
-    let alreadyWrapped = existingArgv.first.map { ProjectKey.resolvePath($0) } == resolvedMultiplexerPath
+    let resolvedMultiplexerPath = fileSystem.resolvePath(multiplexerExecutable)
+    let resolvedWorkspaceRoot = fileSystem.resolvePath(workspaceRoot)
+    let alreadyWrapped = existingArgv.first.map { fileSystem.resolvePath($0) } == resolvedMultiplexerPath
 
     if alreadyWrapped {
       guard force else {

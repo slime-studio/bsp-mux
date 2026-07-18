@@ -4,11 +4,8 @@ import Testing
 @testable import BSPMuxCore
 
 @Suite struct InstallerTests {
-  // Nonexistent paths force ProjectKey.resolvePath's lexical-standardization fallback
-  // (rather than a real realpath(3) call), so results are deterministic regardless of
-  // what happens to exist on the machine running the tests.
-  static let workspaceRoot = "/nonexistent-test-workspace-xyz/project"
-  static let multiplexerExecutable = "/nonexistent-test-workspace-xyz/bin/bsp-mux"
+  static let workspaceRoot = "/test-workspace-xyz/project"
+  static let multiplexerExecutable = "/test-workspace-xyz/bin/bsp-mux"
   static let buildServerJSONPath = "\(workspaceRoot)/buildServer.json"
 
   static func sampleOriginalJSON(argv: [String] = ["/usr/local/bin/sourcekit-xcode-bsp", "serve"]) -> [String: Any] {
@@ -83,6 +80,22 @@ import Testing
     // Not nested: our own path should appear exactly once.
     let occurrences = second.wrappedArgv.filter { $0 == Self.multiplexerExecutable }.count
     #expect(occurrences == 1)
+  }
+
+  @Test func installDetectsAlreadyWrappedThroughSymlinkedMultiplexerPath() throws {
+    // argv[0] is a symlink pointing at the real multiplexer path; only a path resolver
+    // (not string equality) can tell these name the same binary.
+    let symlinkedMultiplexerPath = "/usr/local/bin/bsp-mux-symlink"
+
+    let fs = InMemoryFileSystem(resolvedPaths: [symlinkedMultiplexerPath: Self.multiplexerExecutable])
+    try Self.writeSample(
+      to: fs,
+      argv: [symlinkedMultiplexerPath, "--workspace-root", Self.workspaceRoot, "--", "/usr/local/bin/sourcekit-xcode-bsp", "serve"]
+    )
+    let installer = Installer(fileSystem: fs)
+
+    let result = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
+    #expect(!result.changed)
   }
 
   @Test func installThrowsWhenBuildServerJSONMissing() {
