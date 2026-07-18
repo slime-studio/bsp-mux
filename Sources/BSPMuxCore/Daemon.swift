@@ -48,10 +48,12 @@ public actor Daemon {
     sessions.removeValue(forKey: id)
   }
 
-  /// Handles one message received from `sessionID`'s channel.
-  public func handleClientMessage(from sessionID: SessionID, raw: Data) async throws {
+  /// Handles one message received from `sessionID`'s channel. The caller (the not-yet-built
+  /// receive loop) owns parsing `DuplexChannel.receive()`'s raw bytes into this and deciding
+  /// what to do if that parse fails - a policy decision that belongs there, not baked into
+  /// either the channel or this routing logic.
+  public func handleClientMessage(from sessionID: SessionID, envelope: JSONRPCEnvelope) async throws {
     guard sessions[sessionID] != nil else { return }
-    let envelope = try JSONRPCEnvelope(rawBytes: raw)
 
     if let originalID = envelope.id {
       let backendID = JSONRPCRawID(rawText: String(nextBackendRequestIDValue))
@@ -65,16 +67,15 @@ public actor Daemon {
       if let originId = envelope.paramsField("originId") {
         originIDOwners[originId] = sessionID
       }
-      try await backend.send(raw)
+      try await backend.send(envelope.rawBytes)
     }
   }
 
-  /// Handles one message received from the backend.
-  public func handleBackendMessage(raw: Data) async throws {
-    let envelope = try JSONRPCEnvelope(rawBytes: raw)
-
+  /// Handles one message received from the backend. Same parsing-belongs-to-the-caller
+  /// reasoning as `handleClientMessage`.
+  public func handleBackendMessage(envelope: JSONRPCEnvelope) async throws {
     if envelope.method != nil {
-      try await routeBackendNotification(raw: raw, envelope: envelope)
+      try await routeBackendNotification(envelope)
       return
     }
 
@@ -88,7 +89,7 @@ public actor Daemon {
     try await session.send(envelope.withRewrittenID(originalID))
   }
 
-  private func routeBackendNotification(raw: Data, envelope: JSONRPCEnvelope) async throws {
+  private func routeBackendNotification(_ envelope: JSONRPCEnvelope) async throws {
     if envelope.method == "build/logMessage" {
       // Daemon-internal only: unattributable backend logs aren't generally useful fanned out
       // across every client. (Not yet wired to an actual log file - see the type doc.)
@@ -96,12 +97,12 @@ public actor Daemon {
     }
 
     if let originId = envelope.paramsField("originId"), let owner = originIDOwners[originId] {
-      try await sessions[owner]?.send(raw)
+      try await sessions[owner]?.send(envelope.rawBytes)
       return
     }
 
     for session in sessions.values {
-      try await session.send(raw)
+      try await session.send(envelope.rawBytes)
     }
   }
 }

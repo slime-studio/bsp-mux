@@ -4,18 +4,21 @@ import Testing
 @testable import BSPMuxCore
 
 @Suite struct DaemonTests {
-  static func request(id: String, method: String, originId: String? = nil) -> Data {
+  static func request(id: String, method: String, originId: String? = nil) throws -> JSONRPCEnvelope {
     let params = originId.map { #"{"originId":"\#($0)"}"# } ?? "{}"
-    return Data(#"{"jsonrpc":"2.0","id":\#(id),"method":"\#(method)","params":\#(params)}"#.utf8)
+    let raw = Data(#"{"jsonrpc":"2.0","id":\#(id),"method":"\#(method)","params":\#(params)}"#.utf8)
+    return try JSONRPCEnvelope(rawBytes: raw)
   }
 
-  static func notification(method: String, originId: String? = nil) -> Data {
+  static func notification(method: String, originId: String? = nil) throws -> JSONRPCEnvelope {
     let params = originId.map { #"{"originId":"\#($0)"}"# } ?? "{}"
-    return Data(#"{"jsonrpc":"2.0","method":"\#(method)","params":\#(params)}"#.utf8)
+    let raw = Data(#"{"jsonrpc":"2.0","method":"\#(method)","params":\#(params)}"#.utf8)
+    return try JSONRPCEnvelope(rawBytes: raw)
   }
 
-  static func response(id: String, result: String = "{}") -> Data {
-    Data(#"{"jsonrpc":"2.0","id":\#(id),"result":\#(result)}"#.utf8)
+  static func response(id: String, result: String = "{}") throws -> JSONRPCEnvelope {
+    let raw = Data(#"{"jsonrpc":"2.0","id":\#(id),"result":\#(result)}"#.utf8)
+    return try JSONRPCEnvelope(rawBytes: raw)
   }
 
   @Test func requestGetsRewrittenIdAndResponseComesBackWithOriginalId() async throws {
@@ -24,14 +27,15 @@ import Testing
     let daemon = Daemon(backend: backend)
     let session = await daemon.registerSession(channel: clientChannel)
 
-    try await daemon.handleClientMessage(from: session, raw: Self.request(id: #""abc""#, method: "buildTarget/sources"))
+    try await daemon.handleClientMessage(
+      from: session, envelope: Self.request(id: #""abc""#, method: "buildTarget/sources"))
 
     let forwarded = await backend.sentMessages
     #expect(forwarded.count == 1)
     let forwardedEnvelope = try JSONRPCEnvelope(rawBytes: forwarded[0])
     #expect(forwardedEnvelope.id?.rawText != #""abc""#)  // rewritten to a daemon-minted id
 
-    try await daemon.handleBackendMessage(raw: Self.response(id: forwardedEnvelope.id!.rawText))
+    try await daemon.handleBackendMessage(envelope: Self.response(id: forwardedEnvelope.id!.rawText))
 
     let toClient = await clientChannel.sentMessages
     #expect(toClient.count == 1)
@@ -48,8 +52,8 @@ import Testing
     let sessionB = await daemon.registerSession(channel: channelB)
 
     // Both clients independently chose id 1 - exactly the collision id-rewriting exists for.
-    try await daemon.handleClientMessage(from: sessionA, raw: Self.request(id: "1", method: "foo"))
-    try await daemon.handleClientMessage(from: sessionB, raw: Self.request(id: "1", method: "foo"))
+    try await daemon.handleClientMessage(from: sessionA, envelope: Self.request(id: "1", method: "foo"))
+    try await daemon.handleClientMessage(from: sessionB, envelope: Self.request(id: "1", method: "foo"))
 
     let forwarded = await backend.sentMessages
     #expect(forwarded.count == 2)
@@ -57,8 +61,8 @@ import Testing
     #expect(Set(backendIDs).count == 2)  // daemon minted distinct ids despite the collision
 
     // Respond to B's request first, then A's, to make sure routing isn't order-dependent.
-    try await daemon.handleBackendMessage(raw: Self.response(id: backendIDs[1]))
-    try await daemon.handleBackendMessage(raw: Self.response(id: backendIDs[0]))
+    try await daemon.handleBackendMessage(envelope: Self.response(id: backendIDs[1]))
+    try await daemon.handleBackendMessage(envelope: Self.response(id: backendIDs[0]))
 
     let toA = await channelA.sentMessages
     let toB = await channelB.sentMessages
@@ -74,7 +78,7 @@ import Testing
     let daemon = Daemon(backend: backend)
     _ = await daemon.registerSession(channel: clientChannel)
 
-    try await daemon.handleBackendMessage(raw: Self.response(id: "999"))
+    try await daemon.handleBackendMessage(envelope: Self.response(id: "999"))
 
     let toClient = await clientChannel.sentMessages
     #expect(toClient.isEmpty)
@@ -86,11 +90,11 @@ import Testing
     let daemon = Daemon(backend: backend)
     let session = await daemon.registerSession(channel: clientChannel)
 
-    try await daemon.handleClientMessage(from: session, raw: Self.request(id: "1", method: "foo"))
+    try await daemon.handleClientMessage(from: session, envelope: Self.request(id: "1", method: "foo"))
     let backendID = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0]).id!.rawText
 
-    try await daemon.handleBackendMessage(raw: Self.response(id: backendID))
-    try await daemon.handleBackendMessage(raw: Self.response(id: backendID))  // duplicate/replayed
+    try await daemon.handleBackendMessage(envelope: Self.response(id: backendID))
+    try await daemon.handleBackendMessage(envelope: Self.response(id: backendID))  // duplicate/replayed
 
     let toClient = await clientChannel.sentMessages
     #expect(toClient.count == 1)
@@ -106,9 +110,9 @@ import Testing
 
     // A's request establishes ownership of originId "task-1".
     try await daemon.handleClientMessage(
-      from: sessionA, raw: Self.request(id: "1", method: "buildTarget/compile", originId: "task-1"))
+      from: sessionA, envelope: Self.request(id: "1", method: "buildTarget/compile", originId: "task-1"))
 
-    try await daemon.handleBackendMessage(raw: Self.notification(method: "build/taskStart", originId: "task-1"))
+    try await daemon.handleBackendMessage(envelope: Self.notification(method: "build/taskStart", originId: "task-1"))
 
     let toA = await channelA.sentMessages
     let toB = await channelB.sentMessages
@@ -124,7 +128,7 @@ import Testing
     _ = await daemon.registerSession(channel: channelA)
     _ = await daemon.registerSession(channel: channelB)
 
-    try await daemon.handleBackendMessage(raw: Self.notification(method: "buildTarget/didChange"))
+    try await daemon.handleBackendMessage(envelope: Self.notification(method: "buildTarget/didChange"))
 
     #expect(await channelA.sentMessages.count == 1)
     #expect(await channelB.sentMessages.count == 1)
@@ -138,7 +142,7 @@ import Testing
     let daemon = Daemon(backend: backend)
     _ = await daemon.registerSession(channel: channelA)
 
-    try await daemon.handleBackendMessage(raw: Self.notification(method: "build/taskStart", originId: "never-seen"))
+    try await daemon.handleBackendMessage(envelope: Self.notification(method: "build/taskStart", originId: "never-seen"))
 
     #expect(await channelA.sentMessages.count == 1)
   }
@@ -149,7 +153,7 @@ import Testing
     let daemon = Daemon(backend: backend)
     _ = await daemon.registerSession(channel: channelA)
 
-    try await daemon.handleBackendMessage(raw: Self.notification(method: "build/logMessage"))
+    try await daemon.handleBackendMessage(envelope: Self.notification(method: "build/logMessage"))
 
     #expect(await channelA.sentMessages.isEmpty)
   }
@@ -163,12 +167,13 @@ import Testing
     let session = await daemon.registerSession(channel: clientChannel)
 
     try await daemon.handleClientMessage(
-      from: session, raw: Self.request(id: #""x""#, method: "sourcekit-xcode-bsp/customVendorMethod"))
+      from: session, envelope: Self.request(id: #""x""#, method: "sourcekit-xcode-bsp/customVendorMethod"))
 
     let forwardedEnvelope = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0])
     #expect(forwardedEnvelope.method == "sourcekit-xcode-bsp/customVendorMethod")
 
-    try await daemon.handleBackendMessage(raw: Self.response(id: forwardedEnvelope.id!.rawText, result: #"{"custom":"payload"}"#))
+    try await daemon.handleBackendMessage(
+      envelope: Self.response(id: forwardedEnvelope.id!.rawText, result: #"{"custom":"payload"}"#))
 
     let reply = try JSONRPCEnvelope(rawBytes: await clientChannel.sentMessages[0])
     #expect(reply.id == JSONRPCRawID(rawText: #""x""#))
@@ -183,9 +188,10 @@ import Testing
     _ = await daemon.registerSession(channel: channelB)
 
     try await daemon.handleClientMessage(
-      from: sessionA, raw: Self.request(id: "1", method: "sourcekit-xcode-bsp/vendorRequest", originId: "vendor-task"))
+      from: sessionA,
+      envelope: Self.request(id: "1", method: "sourcekit-xcode-bsp/vendorRequest", originId: "vendor-task"))
     try await daemon.handleBackendMessage(
-      raw: Self.notification(method: "sourcekit-xcode-bsp/vendorProgress", originId: "vendor-task"))
+      envelope: Self.notification(method: "sourcekit-xcode-bsp/vendorProgress", originId: "vendor-task"))
 
     #expect(await channelA.sentMessages.count == 1)
     #expect(await channelB.sentMessages.isEmpty)
@@ -198,7 +204,7 @@ import Testing
     let session = await daemon.registerSession(channel: clientChannel)
     await daemon.deregisterSession(session)
 
-    try await daemon.handleClientMessage(from: session, raw: Self.request(id: "1", method: "foo"))
+    try await daemon.handleClientMessage(from: session, envelope: Self.request(id: "1", method: "foo"))
 
     #expect(await backend.sentMessages.isEmpty)
   }
