@@ -1,0 +1,12 @@
+excluded:
+  - .build
+
+disabled_rules:
+  - identifier_name
+
+line_length:
+  warning: 180
+  error: 250
+
+trailing_comma:
+  mandatory_comma: true
