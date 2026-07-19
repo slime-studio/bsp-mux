@@ -122,16 +122,20 @@ import Testing
     try paths.ensureBaseDirectoryExists()
   }
 
-  @Test func metaRoundTripsThroughDisk() throws {
-    let path = "/tmp/bsp-mux-test-meta-\(UUID().uuidString).json"
-    defer { try? FileManager.default.removeItem(atPath: path) }
-
+  @Test func metaRoundTripsThroughRepository() throws {
     let key = Self.key(workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend", "serve"])
     let meta = ProjectKeyMeta(key: key, workspaceRoot: "/tmp/project", backendArgv: ["/usr/bin/backend", "serve"])
-    try meta.write(to: path)
+    let path = "/tmp/bsp-mux-test/meta.json"
 
-    let readBack = try ProjectKeyMeta.read(from: path)
-    #expect(readBack == meta)
-    #expect(readBack.fullHash == key.fullHash)
+    try withDependencies {
+      $0.fileSystem = InMemoryFileSystem()
+    } operation: {
+      let repository = ProjectKeyMetaRepository()
+      try repository.save(meta, to: path)
+
+      let readBack = try repository.load(from: path)
+      #expect(readBack == meta)
+      #expect(readBack.fullHash == key.fullHash)
+    }
   }
 }

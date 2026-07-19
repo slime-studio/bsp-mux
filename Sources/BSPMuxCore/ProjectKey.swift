@@ -123,7 +123,8 @@ public enum ProjectPathsError: Error, CustomStringConvertible {
 
 /// Recorded alongside the socket so a connecting client can verify it's talking to the
 /// daemon for *its* project key, not one that happens to collide on the truncated
-/// `shortHash` (astronomically unlikely at 64 bits, but cheap to check).
+/// `shortHash` (astronomically unlikely at 64 bits, but cheap to check). A plain value with no
+/// persistence knowledge of its own — see `ProjectKeyMetaRepository` for reading/writing it.
 public struct ProjectKeyMeta: Codable, Sendable, Equatable {
   public let fullHash: String
   public let workspaceRoot: String
@@ -134,14 +135,24 @@ public struct ProjectKeyMeta: Codable, Sendable, Equatable {
     self.workspaceRoot = workspaceRoot
     self.backendArgv = backendArgv
   }
+}
 
-  public func write(to path: String) throws {
-    let data = try JSONEncoder().encode(self)
-    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+/// Reads and writes `ProjectKeyMeta` sidecar files. Kept separate from `ProjectKeyMeta` itself
+/// so the value stays a plain, persistence-ignorant `Codable` struct - it doesn't know it gets
+/// saved to disk, doesn't hold a filesystem dependency, and can't be tempted to grow other
+/// self-serialization methods over time.
+public struct ProjectKeyMetaRepository: Sendable {
+  @Dependency(\.fileSystem) private var fileSystem
+
+  public init() {}
+
+  public func save(_ meta: ProjectKeyMeta, to path: String) throws {
+    let data = try JSONEncoder().encode(meta)
+    try fileSystem.write(data, toPath: path)
   }
 
-  public static func read(from path: String) throws -> ProjectKeyMeta {
-    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+  public func load(from path: String) throws -> ProjectKeyMeta {
+    let data = try fileSystem.contents(atPath: path)
     return try JSONDecoder().decode(ProjectKeyMeta.self, from: data)
   }
 }
