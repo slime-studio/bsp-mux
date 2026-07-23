@@ -302,47 +302,70 @@ POSIX equivalent exists.
 
 - `Sources/BSPMuxCore` — all logic, unit-testable in isolation:
   `ProjectKey`/`ProjectPaths` (key derivation, socket/lockfile paths),
-  `Installer` (the `install` subcommand), `Election` (connect/flock race,
-  daemon bootstrap), `Relay` (loser-of-election byte pump), `ClientSession`
-  (per-connection state over an abstract duplex channel), `Daemon` (the
-  actor holding all multiplexing state), `NotificationRouter` (broadcast
-  vs. `originId`-routed classification).
-- `Sources/bsp-mux` — thin CLI entry point.
-- `Sources/fake-bsp-backend` — a minimal BSP backend test double, built
-  against the same `BuildServerProtocol`/`LanguageServerProtocolTransport`
-  dependencies so wire compatibility is automatic; used by the integration
-  tests and available for manual testing without needing a real Xcode
-  project.
+  `Installer` (the `install` subcommand), `Election`/`ElectionEnvironment`
+  (connect/flock race, daemon bootstrap), `JSONRPCEnvelope`/`MessageFraming`
+  (byte-preserving JSON-RPC parsing/ID-rewriting and Content-Length
+  framing), `DuplexChannel`/`ClientSession` (per-connection state over an
+  abstract duplex channel), `Daemon` (the actor holding all multiplexing
+  *and* BSP lifecycle state — id-rewrite demux, `originId`-based
+  notification routing, and the `build/initialize`/`initialized`/
+  `shutdown`/`exit` handling; there's no separate `NotificationRouter` or
+  lifecycle component — see `BSPMessages`'s doc comment for why that split
+  turned out not to be clean), `BSPMessages` (the stateless field-comparison
+  and wire-message-construction helpers `Daemon` calls into), `BSPMethod`
+  (string constants for the handful of BSP methods this codebase gives
+  special meaning to).
+- `Sources/bsp-mux` — CLI entry point; still a placeholder, not yet wired
+  to `Election`/`Daemon`.
+- `Sources/fake-bsp-backend` — a minimal BSP backend test double, meant to
+  be built against the same `BuildServerProtocol`/
+  `LanguageServerProtocolTransport` dependencies so wire compatibility is
+  automatic, for the integration tests and manual testing without a real
+  Xcode project; still a placeholder.
 - `Tests/BSPMuxCoreTests` — unit tests, no real processes or sockets.
-- `Tests/BSPMuxIntegrationTests` — spawns real subprocesses via `Process`,
-  drives `fake-bsp-backend`, exercises the full election/multiplexing flow
-  end to end.
+- `Tests/BSPMuxIntegrationTests` — will spawn real subprocesses via
+  `Process`, drive `fake-bsp-backend`, and exercise the full
+  election/multiplexing flow end to end; still a placeholder.
 
 ## Status
 
 Implemented and tested: `ProjectKey`/`ProjectPaths` (key derivation, socket
-path budget, meta round-trip), `Installer` (argv-splice `install`,
-idempotency, `--force` unwrap/rewrap), both backed by an injectable
-`FileSystemProviding` seam so disk I/O and `realpath(3)` resolution are
-fakeable in tests. `Election` (connect/flock race, daemon bootstrap) is
-implemented behind an `ElectionEnvironment` seam and
-unit-tested against a fake for its decision logic; its cross-process
-guarantees (no split-brain on a cold-start race, no duplicate daemon if a
-live daemon's socket is deleted out from under it, prompt takeover after a
+path budget, meta round-trip via `ProjectKeyMetaRepository`), `Installer`
+(argv-splice `install`, idempotency, `--force` unwrap/rewrap), `Election`
+(connect/flock race, daemon bootstrap) unit-tested against a fake
+`ElectionEnvironment` for its decision logic — its cross-process guarantees
+(no split-brain on a cold-start race, no duplicate daemon if a live
+daemon's socket is deleted out from under it, prompt takeover after a
 crash) were verified once by hand against the real POSIX implementation but
-are not yet in the automated suite — see Verification below.
+are not yet in the automated suite, see Verification below.
+`JSONRPCEnvelope`/`MessageFraming` (byte-preserving id/method extraction,
+ID rewriting, Content-Length framing, adversarially tested against
+escaping/nesting/large-integer/multi-byte-UTF-8/chunked-framing cases).
+`Daemon` (id-rewrite mint→respond→prune demux, `originId` notification
+routing with broadcast default, custom/vendor-method passthrough,
+`build/initialize` handshake cache/replay/mismatch-detection with
+concurrent-caller coordination, `build/initialized` forwarded exactly
+once, `build/shutdown` synthesized response, `build/exit`/idle-grace-period
+refcounted teardown, `waitForShutdown()`). All of the above are backed by
+injectable seams (`FileSystemProviding`, `ElectionEnvironment`, and
+`swift-clocks`' `Clock` for `Daemon`'s idle timer) registered as
+`swift-dependencies` `@Dependency` values, so disk I/O, POSIX calls, and
+time are fakeable/controllable in tests without real waits.
 
-Not yet implemented: `Relay`, `ClientSession`, `Daemon`, `NotificationRouter`,
-the real `bsp-mux` CLI entry point, `fake-bsp-backend`, and the integration
-test suite.
+Not yet implemented: the real `bsp-mux` CLI entry point (wiring `Election`
+and `Daemon` together with real process/socket I/O), the loser-of-election
+relay byte pump, `fake-bsp-backend`, and the integration test suite.
 
 ## Verification
 
 - **Unit tests**: `ProjectKey` determinism and socket-path length bounds
-  (done); `NotificationRouter` classification table; ID/`originId`
+  (done); `Installer`'s argv-splice round-trip against an in-memory
+  filesystem fake (done); `JSONRPCEnvelope`/`MessageFraming` byte-level
+  parsing and framing edge cases (done); `Daemon`'s ID/`originId`
   rewrite-map mint→respond→prune lifecycle including unmapped-response
-  handling; `Installer`'s argv-splice round-trip against an in-memory
-  filesystem fake (done).
+  handling, notification broadcast-vs-`originId` routing, and the full
+  `build/initialize`/`initialized`/`shutdown`/`exit` lifecycle including
+  the idle-grace-period timer via `TestClock` (done).
 - **Integration tests** (real subprocesses, temp workspace dirs, driving
   `fake-bsp-backend`): two simulated clients converge on one backend
   process and one real `initialize` handshake; `originId`-routed

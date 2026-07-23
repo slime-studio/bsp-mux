@@ -1,3 +1,5 @@
+import Clocks
+import Dependencies
 import Foundation
 import Testing
 
@@ -200,11 +202,18 @@ import Testing
   @Test func messageFromDeregisteredSessionIsDroppedWithoutThrowing() async throws {
     let backend = FakeDuplexChannel()
     let clientChannel = FakeDuplexChannel()
-    let daemon = Daemon(backend: backend)
-    let session = await daemon.registerSession(channel: clientChannel)
-    await daemon.deregisterSession(session)
 
-    try await daemon.handleClientMessage(from: session, envelope: Self.request(id: "1", method: "foo"))
+    // deregisterSession now starts the idle grace timer, which reads @Dependency(\.continuousClock) -
+    // a TestClock that's never advanced keeps that timer from ever firing during this test.
+    try await withDependencies {
+      $0.continuousClock = TestClock()
+    } operation: {
+      let daemon = Daemon(backend: backend)
+      let session = await daemon.registerSession(channel: clientChannel)
+      await daemon.deregisterSession(session)
+
+      try await daemon.handleClientMessage(from: session, envelope: Self.request(id: "1", method: "foo"))
+    }
 
     #expect(await backend.sentMessages.isEmpty)
   }
