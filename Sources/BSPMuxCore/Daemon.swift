@@ -1,20 +1,15 @@
+import Dependencies
 import Foundation
 
 /// Owns everything DESIGN.md's "Daemon-side state" describes for one project: the connected
-/// sessions, the single backend connection, and the tables that let several sessions share it.
-/// An actor so all mutation (a new session registering, a request racing a response) is
-/// serialized without hand-rolled locking.
+/// sessions, the single backend connection, and the tables that let several sessions share it
+/// — including `build/initialize`'s handshake round trip and the `build/initialized`/
+/// `shutdown`/`exit` lifecycle, which turned out not to be cleanly separable from that state
+/// (see `BSPMessages`'s doc comment for why). An actor so all mutation (a new session
+/// registering, a request racing a response) is serialized without hand-rolled locking.
 ///
-/// This is the core multiplexing logic — request/response id-rewriting and notification
-/// routing — and it's deliberately all this type does so far. Still missing, on purpose:
-/// - The `build/initialize`/`build/initialized`/`build/shutdown`/`build/exit` lifecycle
-///   methods aren't special-cased yet (they fall through the generic forwarding path below),
-///   so multi-client correctness for the handshake cache/replay and refcounted teardown isn't
-///   here yet. `build/initialize` specifically needs a decision about which response fields
-///   are safe to compare across clients before it can be built correctly.
-/// - No refcount or idle-grace-period teardown.
-/// - No real I/O — this operates purely on `DuplexChannel`/message bodies, not actual
-///   stdio/socket wiring or backend process spawning.
+/// Still missing, on purpose: real I/O — this operates purely on `DuplexChannel`/message
+/// bodies, not actual stdio/socket wiring or backend process spawning.
 public actor Daemon {
   private var sessions: [SessionID: ClientSession] = [:]
   private var nextSessionIDValue = 0
@@ -32,43 +27,135 @@ public actor Daemon {
   /// later backend notification carrying the same originId can be routed back to just them.
   private var originIDOwners: [String: SessionID] = [:]
 
-  public init(backend: any DuplexChannel) {
+  /// `build/initialize`'s handshake: the real round trip happens once, against `firstRequest`;
+  /// every concurrent or later caller awaits `initializeTask`'s same result (in flight, it's
+  /// the real backend round trip; already completed, `Task.value` just replays it) rather than
+  /// Daemon coordinating that fan-out by hand.
+  private var initializeTask: Task<JSONRPCEnvelope, Error>?
+  private var firstInitializeRequest: JSONRPCEnvelope?
+  private var pendingInitializeBackendID: JSONRPCRawID?
+  private var pendingInitializeContinuation: CheckedContinuation<JSONRPCEnvelope, Error>?
+  private var hasForwardedInitialized = false
+
+  private let idleGracePeriod: Duration
+  @Dependency(\.continuousClock) private var clock
+  private var idleGraceTask: Task<Void, Never>?
+  private var hasShutDown = false
+  private var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
+
+  public init(backend: any DuplexChannel, idleGracePeriod: Duration = .seconds(5)) {
     self.backend = backend
+    self.idleGracePeriod = idleGracePeriod
   }
 
   @discardableResult
   public func registerSession(channel: any DuplexChannel) -> SessionID {
+    // Safe no-op if nothing was actually pending.
+    idleGraceTask?.cancel()
+    idleGraceTask = nil
     let id = SessionID(nextSessionIDValue)
     nextSessionIDValue += 1
     sessions[id] = ClientSession(id: id, channel: channel)
     return id
   }
 
+  /// Also how a client's `build/exit` (or an abrupt disconnect, once real I/O detects one) is
+  /// handled — both just mean "this session is gone now."
   public func deregisterSession(_ id: SessionID) {
-    sessions.removeValue(forKey: id)
+    guard sessions.removeValue(forKey: id) != nil else { return }
+    if sessions.isEmpty {
+      startIdleGraceTimer()
+    }
+  }
+
+  /// Suspends until the daemon has sent the backend its real shutdown and decided to exit
+  /// (the idle grace period elapsed with no new session registering). Callers awaiting this
+  /// should then tear down and exit the process. Returns immediately if that's already happened.
+  public func waitForShutdown() async {
+    guard !hasShutDown else { return }
+    await withCheckedContinuation { continuation in
+      shutdownContinuations.append(continuation)
+    }
   }
 
   /// Handles one message received from `sessionID`'s channel. The caller (the not-yet-built
   /// receive loop) owns parsing `DuplexChannel.receive()`'s raw bytes into this and deciding
   /// what to do if that parse fails - a policy decision that belongs there, not baked into
   /// either the channel or this routing logic.
+  ///
+  /// For `build/initialize` specifically, this suspends until the real backend round trip
+  /// resolves (its own, or the one a concurrent first caller already started) - other
+  /// sessions' messages are still processed normally in the meantime, since that suspension
+  /// only blocks this one call, not the actor.
   public func handleClientMessage(from sessionID: SessionID, envelope: JSONRPCEnvelope) async throws {
-    guard sessions[sessionID] != nil else { return }
+    guard let session = sessions[sessionID] else { return }
 
+    switch envelope.method {
+    case .buildInitialize:
+      guard let originalID = envelope.id else { return }
+      try await session.send(try await handleInitialize(envelope, originalID: originalID))
+    case .buildInitialized:
+      // BSP assumes exactly one real handshake; only the first client's confirmation is real.
+      guard !hasForwardedInitialized else { return }
+      hasForwardedInitialized = true
+      try await backend.send(envelope.rawBytes)
+    case .buildShutdown:
+      guard let id = envelope.id else { return }
+      try await session.send(BSPMessages.successResponse(id: id))
+    case .buildExit:
+      deregisterSession(sessionID)
+    default:
+      try await forwardToBackend(envelope, from: sessionID)
+    }
+  }
+
+  private func handleInitialize(_ envelope: JSONRPCEnvelope, originalID: JSONRPCRawID) async throws -> Data {
+    let response: JSONRPCEnvelope
+    let firstRequest: JSONRPCEnvelope
+
+    if let task = initializeTask, let cachedFirstRequest = firstInitializeRequest {
+      response = try await task.value
+      firstRequest = cachedFirstRequest
+    } else {
+      firstRequest = envelope
+      firstInitializeRequest = envelope
+      let backendID = mintBackendRequestID()
+      let task = Task<JSONRPCEnvelope, Error> { [backend] in
+        try await backend.send(envelope.withRewrittenID(backendID))
+        return try await withCheckedThrowingContinuation { continuation in
+          self.pendingInitializeBackendID = backendID
+          self.pendingInitializeContinuation = continuation
+        }
+      }
+      initializeTask = task
+      response = try await task.value
+    }
+
+    if let mismatchedField = BSPMessages.mismatchedInitializeField(firstRequest, envelope) {
+      return try BSPMessages.mismatchErrorResponse(id: originalID, field: mismatchedField)
+    }
+    return response.withRewrittenID(originalID)
+  }
+
+  private func forwardToBackend(_ envelope: JSONRPCEnvelope, from sessionID: SessionID) async throws {
     if let originalID = envelope.id {
-      let backendID = JSONRPCRawID(rawText: String(nextBackendRequestIDValue))
-      nextBackendRequestIDValue += 1
+      let backendID = mintBackendRequestID()
       pendingRequests[backendID.rawText] = (session: sessionID, originalID: originalID)
-      if let originId = envelope.paramsField("originId") {
+      if let originId = envelope.paramsField(.originId) {
         originIDOwners[originId] = sessionID
       }
       try await backend.send(envelope.withRewrittenID(backendID))
     } else {
-      if let originId = envelope.paramsField("originId") {
+      if let originId = envelope.paramsField(.originId) {
         originIDOwners[originId] = sessionID
       }
       try await backend.send(envelope.rawBytes)
     }
+  }
+
+  private func mintBackendRequestID() -> JSONRPCRawID {
+    defer { nextBackendRequestIDValue += 1 }
+    return JSONRPCRawID(rawText: String(nextBackendRequestIDValue))
   }
 
   /// Handles one message received from the backend. Same parsing-belongs-to-the-caller
@@ -80,6 +167,14 @@ public actor Daemon {
     }
 
     guard let backendID = envelope.id else { return }
+
+    if let pendingID = pendingInitializeBackendID, pendingID == backendID, let continuation = pendingInitializeContinuation {
+      pendingInitializeBackendID = nil
+      pendingInitializeContinuation = nil
+      continuation.resume(returning: envelope)
+      return
+    }
+
     guard let (sessionID, originalID) = pendingRequests.removeValue(forKey: backendID.rawText) else {
       // Unmapped response: no in-flight request minted this id (already answered, or the
       // backend sent an id we never issued). Nothing meaningful to route it to.
@@ -90,13 +185,13 @@ public actor Daemon {
   }
 
   private func routeBackendNotification(_ envelope: JSONRPCEnvelope) async throws {
-    if envelope.method == "build/logMessage" {
+    if envelope.method == .buildLogMessage {
       // Daemon-internal only: unattributable backend logs aren't generally useful fanned out
       // across every client. (Not yet wired to an actual log file - see the type doc.)
       return
     }
 
-    if let originId = envelope.paramsField("originId"), let owner = originIDOwners[originId] {
+    if let originId = envelope.paramsField(.originId), let owner = originIDOwners[originId] {
       try await sessions[owner]?.send(envelope.rawBytes)
       return
     }
@@ -104,5 +199,30 @@ public actor Daemon {
     for session in sessions.values {
       try await session.send(envelope.rawBytes)
     }
+  }
+
+  private func startIdleGraceTimer() {
+    idleGraceTask = Task {
+      do {
+        try await clock.sleep(for: idleGracePeriod)
+      } catch {
+        return  // Cancelled: a new session registered before the grace period elapsed.
+      }
+      await performShutdown()
+    }
+  }
+
+  private func performShutdown() async {
+    guard !hasShutDown else { return }
+    // Best-effort: the daemon is exiting either way, and a send failure here (e.g. the
+    // backend already died) doesn't change that.
+    try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
+    try? await backend.send(BSPMessages.exitNotificationData())
+
+    hasShutDown = true
+    for continuation in shutdownContinuations {
+      continuation.resume()
+    }
+    shutdownContinuations.removeAll()
   }
 }
