@@ -27,6 +27,17 @@ public enum MessageFraming {
 /// how to accumulate and slice bytes; whoever owns the actual stdio/socket read loop feeds it.
 public struct MessageFrameReader: Sendable {
   private var buffer = Data()
+  /// The header search and `Content-Length` parse, cached once found so a large body arriving
+  /// across many `feed()` calls doesn't redo either on every single call while just waiting for
+  /// more bytes - confirmed empirically to matter: re-parsing the header per call scales with
+  /// call count, not message size, and at fine-grained chunking (e.g. one byte at a time) that's
+  /// the difference between low-single-digit milliseconds and multiple seconds for a large body.
+  private var pendingHeader: PendingHeader?
+
+  private struct PendingHeader {
+    let bodyStart: Data.Index
+    let contentLength: Int
+  }
 
   public init() {}
 
@@ -50,19 +61,26 @@ public struct MessageFrameReader: Sendable {
   }
 
   private mutating func extractNextMessage() throws -> Data? {
-    guard let headerEndRange = buffer.range(of: Self.headerTerminator) else {
+    let header: PendingHeader
+    if let cached = pendingHeader {
+      header = cached
+    } else {
+      guard let headerEndRange = buffer.range(of: Self.headerTerminator) else {
+        return nil
+      }
+      let headerBytes = buffer[buffer.startIndex..<headerEndRange.lowerBound]
+      let contentLength = try Self.parseContentLength(headerBytes)
+      header = PendingHeader(bodyStart: headerEndRange.upperBound, contentLength: contentLength)
+      pendingHeader = header
+    }
+
+    guard let bodyEnd = buffer.index(header.bodyStart, offsetBy: header.contentLength, limitedBy: buffer.endIndex) else {
       return nil
     }
-    let headerBytes = buffer[buffer.startIndex..<headerEndRange.lowerBound]
-    let contentLength = try Self.parseContentLength(headerBytes)
 
-    let bodyStart = headerEndRange.upperBound
-    guard let bodyEnd = buffer.index(bodyStart, offsetBy: contentLength, limitedBy: buffer.endIndex) else {
-      return nil
-    }
-
-    let body = Data(buffer[bodyStart..<bodyEnd])
+    let body = Data(buffer[header.bodyStart..<bodyEnd])
     buffer.removeSubrange(buffer.startIndex..<bodyEnd)
+    pendingHeader = nil
     return body
   }
 
