@@ -306,8 +306,16 @@ POSIX equivalent exists.
   (connect/flock race, daemon bootstrap), `JSONRPCEnvelope`/`MessageFraming`
   (byte-preserving JSON-RPC parsing/ID-rewriting and Content-Length
   framing), `DuplexChannel`/`ClientSession` (per-connection state over an
-  abstract duplex channel), `Daemon` (the actor holding all multiplexing
-  *and* BSP lifecycle state — id-rewrite demux, `originId`-based
+  abstract duplex channel), `FramedDuplexChannel` (the real `DuplexChannel`
+  conformance — composes any `ByteSource`/`ByteSink` pair with
+  `MessageFraming` to vend complete message bodies), `ByteStream`
+  (`ByteSource`/`ByteSink`, the raw framing-free byte-level seam `Relay`
+  needs so it never parses BSP), `Relay` (the loser-of-election byte pump —
+  two concurrent directions, either side's EOF/error ending the other),
+  `RealByteStream` (`RealByteSource`/`RealByteSink`, the real fd-backed
+  `ByteSource`/`ByteSink` conformances — coalescing reads and
+  back-pressured writes, see Status below), `Daemon` (the actor holding all
+  multiplexing *and* BSP lifecycle state — id-rewrite demux, `originId`-based
   notification routing, and the `build/initialize`/`initialized`/
   `shutdown`/`exit` handling; there's no separate `NotificationRouter` or
   lifecycle component — see `BSPMessages`'s doc comment for why that split
@@ -346,15 +354,30 @@ routing with broadcast default, custom/vendor-method passthrough,
 `build/initialize` handshake cache/replay/mismatch-detection with
 concurrent-caller coordination, `build/initialized` forwarded exactly
 once, `build/shutdown` synthesized response, `build/exit`/idle-grace-period
-refcounted teardown, `waitForShutdown()`). All of the above are backed by
-injectable seams (`FileSystemProviding`, `ElectionEnvironment`, and
-`swift-clocks`' `Clock` for `Daemon`'s idle timer) registered as
+refcounted teardown, `waitForShutdown()`). `Relay` (the loser-of-election
+byte pump, both directions, either side's EOF/error ending the other) and
+`FramedDuplexChannel` (the real `DuplexChannel` — reassembles complete
+message bodies from whatever chunking the underlying `ByteSource` hands
+it, including a message truncated mid-frame by a dead connection being a
+distinct error from a clean EOF between messages). `RealByteSource`/
+`RealByteSink` (the real fd-backed I/O `Relay`/`FramedDuplexChannel` run
+over): reads are coalesced into larger chunks via two long-lived tasks
+(a never-interrupted listener plus a periodically-checking flusher)
+rather than racing every byte against a timeout — an earlier per-byte-race
+design was confirmed empirically to lose data under contention, since
+cancelling a `FileHandle.bytes` fetch that's genuinely mid-flight and
+starting a new one races against it; writes get genuine back-pressure
+(callers suspend for their turn rather than failing outright), since
+POSIX only guarantees `write()` atomicity up to `PIPE_BUF`. All of the
+above are backed by injectable seams (`FileSystemProviding`,
+`ElectionEnvironment`, and `swift-clocks`' `Clock` for `Daemon`'s idle
+timer and `RealByteSource`'s coalescing flusher) registered as
 `swift-dependencies` `@Dependency` values, so disk I/O, POSIX calls, and
 time are fakeable/controllable in tests without real waits.
 
 Not yet implemented: the real `bsp-mux` CLI entry point (wiring `Election`
-and `Daemon` together with real process/socket I/O), the loser-of-election
-relay byte pump, `fake-bsp-backend`, and the integration test suite.
+and `Daemon` together, spawning the backend process, accepting socket
+connections), `fake-bsp-backend`, and the integration test suite.
 
 ## Verification
 
@@ -365,7 +388,16 @@ relay byte pump, `fake-bsp-backend`, and the integration test suite.
   rewrite-map mint→respond→prune lifecycle including unmapped-response
   handling, notification broadcast-vs-`originId` routing, and the full
   `build/initialize`/`initialized`/`shutdown`/`exit` lifecycle including
-  the idle-grace-period timer via `TestClock` (done).
+  the idle-grace-period timer via `TestClock` (done); `Relay` against
+  fakes, including one direction's EOF/error correctly cancelling the
+  other's still-open read rather than deadlocking (done); `FramedDuplexChannel`
+  against fakes — message reassembly across arbitrarily small chunks,
+  multiple coalesced messages yielded one at a time, a clean EOF versus a
+  connection dying mid-message being distinct outcomes (done); `RealByteSource`/
+  `RealByteSink` against real OS pipes — write/read round trips, EOF,
+  cancellation stopping a pending read promptly, a write-side `EPIPE`
+  propagating, and small writes coalescing into one chunk once idle
+  verified deterministically via `TestClock.advance` (done).
 - **Integration tests** (real subprocesses, temp workspace dirs, driving
   `fake-bsp-backend`): two simulated clients converge on one backend
   process and one real `initialize` handshake; `originId`-routed

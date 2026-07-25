@@ -30,6 +30,13 @@ public struct MessageFrameReader: Sendable {
 
   public init() {}
 
+  /// Whether a partial header or partial body is currently buffered, waiting for more bytes.
+  /// Lets a caller distinguish a clean EOF between messages from one that cuts a message off
+  /// mid-frame - the latter means the connection died, not that it finished normally.
+  public var hasBufferedPartialData: Bool {
+    !buffer.isEmpty
+  }
+
   /// Feeds newly-received bytes and returns every complete message body extracted so far, in
   /// order. Incomplete trailing data (a partial header or partial body) stays buffered for the
   /// next call.
