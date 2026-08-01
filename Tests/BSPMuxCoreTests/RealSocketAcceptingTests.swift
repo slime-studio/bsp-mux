@@ -20,10 +20,9 @@ import Testing
 
       async let accepted = RealSocketAccepting().accept(on: listening)
 
-      // Give the accept() call a moment to actually be blocked in accept() before connecting -
-      // not required for correctness (the kernel queues a pending connect either way), just
-      // exercises the "client arrives after accept() is already waiting" ordering explicitly.
-      try await Task.sleep(for: .milliseconds(20))
+      // No synchronization needed before connecting: the kernel queues a pending connection in
+      // the listen backlog regardless of whether accept() has been called yet, so this doesn't
+      // depend on winning a race against the async let above.
       guard let clientConnection = try environment.connect(to: path) else {
         Issue.record("expected connect() to succeed against a live listener")
         return
