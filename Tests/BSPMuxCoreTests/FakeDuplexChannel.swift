@@ -9,12 +9,21 @@ import Foundation
 actor FakeDuplexChannel: DuplexChannel {
   private(set) var sentMessages: [Data] = []
   private var pendingIncoming: [Data] = []
+  private var readError: Error?
+
+  init(readError: Error? = nil) {
+    self.readError = readError
+  }
 
   func send(_ body: Data) async throws {
     sentMessages.append(body)
   }
 
   func receive() async throws -> Data? {
+    if let error = readError {
+      readError = nil
+      throw error
+    }
     guard !pendingIncoming.isEmpty else { return nil }
     return pendingIncoming.removeFirst()
   }
