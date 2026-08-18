@@ -98,6 +98,17 @@ public struct RealElectionEnvironment: ElectionEnvironment {
     throw ElectionError.errno("setsid", errno)
   }
 
+  // Verified once by hand (a throwaway diagnostic process: installed a SIGUSR1 handler,
+  // called this, confirmed the handler fired within the same process) rather than in the
+  // automated suite - unlike this file's other real POSIX behavior, this one is unsafe to
+  // exercise for real inside the test runner's own process, since `swift test`'s process
+  // very likely shares a process group with whatever this call would target, and killing that
+  // group mid-run would take down the test runner itself, not just the code under test.
+  public func signalOwnProcessGroup(_ signal: Int32) {
+    // A negative pid targets the whole process group rather than one specific process.
+    _ = kill(-getpgrp(), signal)
+  }
+
   private static func makeSockaddrUn(path: String) throws -> sockaddr_un {
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)

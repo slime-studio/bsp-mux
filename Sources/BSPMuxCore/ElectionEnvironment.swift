@@ -21,9 +21,12 @@ public struct LockHandle: Sendable, Equatable {
   public init(fileDescriptor: Int32) { self.fileDescriptor = fileDescriptor }
 }
 
-/// The socket/lock/process primitives `Election` needs, narrow enough to fake in unit tests.
-/// File removal lives on `FileSystemProviding` instead, since deleting a stale socket file
-/// isn't election-specific.
+/// The socket/lock/process-identity primitives `Election` needs to run the connect/flock race
+/// and become a daemon (`connect`/`acquireLockNonBlocking`/`listen`/`ignoreSIGPIPE`/
+/// `detachSession`), plus the process-group signaling a daemon eventually needs at the other end
+/// of its life to make sure it doesn't leave anything behind — narrow enough to fake in unit
+/// tests. File removal lives on `FileSystemProviding` instead, since deleting a stale socket
+/// file isn't election-specific.
 public protocol ElectionEnvironment: Sendable {
   /// Attempts to connect to the daemon's socket at `socketPath`. Returns `nil` if nothing is
   /// listening there yet (the socket path doesn't exist, or exists but is stale/refused) —
@@ -44,6 +47,18 @@ public protocol ElectionEnvironment: Sendable {
 
   /// Detaches this process into its own session (`setsid()`) so it survives its parent exiting.
   func detachSession() throws
+
+  /// Sends `signal` to this process's own process group — deliberately the whole group, not
+  /// just this one process — as the backstop that guarantees a spawned backend (and anything
+  /// *it* itself spawns) doesn't outlive the daemon as an orphan. Reaches the daemon itself too,
+  /// since it's meant to be called as (one of) the daemon's own last acts before it exits, not
+  /// from inside its normal operation. Relies on `detachSession()` having already made this
+  /// process its own process-group leader — every backend spawned afterward inherits that same
+  /// group by default (confirmed empirically against `swift-subprocess`). A pure OS-level
+  /// backstop, not a substitute for `Daemon`'s own graceful `build/shutdown`/`build/exit` flow -
+  /// that stays the primary path; this is what still runs when the daemon never gets the chance
+  /// to attempt that (an external `SIGTERM`/`SIGINT`, or an unexpected internal error).
+  func signalOwnProcessGroup(_ signal: Int32)
 }
 
 public struct ElectionError: Swift.Error, CustomStringConvertible, Equatable {

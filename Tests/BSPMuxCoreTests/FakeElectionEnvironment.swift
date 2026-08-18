@@ -71,4 +71,11 @@ final class FakeElectionEnvironment: ElectionEnvironment, @unchecked Sendable {
       throw error
     }
   }
+
+  private(set) var signaledProcessGroupSignals: [Int32] = []
+
+  func signalOwnProcessGroup(_ signal: Int32) {
+    calls.append("signalOwnProcessGroup")
+    signaledProcessGroupSignals.append(signal)
+  }
 }
