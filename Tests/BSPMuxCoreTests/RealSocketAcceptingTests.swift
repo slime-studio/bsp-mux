@@ -1,5 +1,3 @@
-import Clocks
-import Dependencies
 import Foundation
 import Testing
 
@@ -32,20 +30,16 @@ import Testing
       let serverConnection = try await accepted
       defer { close(serverConnection.fileDescriptor) }
 
-      try await withDependencies {
-        $0.continuousClock = ImmediateClock()
-      } operation: {
-        let serverSource = RealByteSource(fileDescriptor: serverConnection.fileDescriptor)
-        let clientSink = RealByteSink(fileDescriptor: clientConnection.fileDescriptor)
+      let serverSource = RealByteSource(fileDescriptor: serverConnection.fileDescriptor)
+      let clientSink = RealByteSink(fileDescriptor: clientConnection.fileDescriptor)
 
-        try await clientSink.write(Data("hello".utf8))
+      try await clientSink.write(Data("hello".utf8))
 
-        var received = Data()
-        while received.count < 5, let chunk = try await serverSource.read() {
-          received.append(chunk)
-        }
-        #expect(received == Data("hello".utf8))
+      var received = Data()
+      while received.count < 5, let chunk = try await serverSource.read() {
+        received.append(chunk)
       }
+      #expect(received == Data("hello".utf8))
     }
   }
 
