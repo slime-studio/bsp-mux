@@ -1,59 +1,52 @@
-import Dependencies
 import Foundation
 
-/// Bridges a raw file descriptor's read direction into `ByteSource`, backed by
-/// `FileHandle.bytes` (Foundation's own async, cancellation-aware file I/O — confirmed
-/// empirically that a blocked `next()` throws `CancellationError` promptly rather than hanging
-/// when its task is cancelled, exactly what `Relay`'s cross-cancellation needs).
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
+
+/// Bridges a raw file descriptor's read direction into `ByteSource`, backed by a non-blocking fd
+/// and a `DispatchSourceRead` rather than `FileHandle.bytes`.
 ///
-/// Reading one byte at a time and yielding each individually would mean `Relay`'s pump turns
-/// every relayed message into one `write()` syscall per byte, so `pump` coalesces bytes into
-/// larger chunks before handing them off, via two long-lived tasks rather than racing every
-/// single byte against a timeout:
-/// - a **listener** that just runs a plain, never-interrupted `for try await byte in handle.bytes`
-///   loop, appending each byte to a shared buffer;
-/// - a **flusher** that sleeps for `coalesceWindow` via `@Dependency(\.continuousClock)` (so
-///   tests drive it deterministically with `TestClock`, same as `Daemon`'s idle-grace timer) and
-///   flushes the buffer if nothing arrived during that whole sleep.
+/// `FileHandle.bytes` was the original implementation, and it turned out to be a real hazard,
+/// not just a style preference: confirmed both empirically (a stack sample of a hung real
+/// process, caught while investigating an unrelated test's flakiness) and independently
+/// documented (Andy Finnell, "Reading and writing files in Swift async/await",
+/// https://losingfight.com/blog/2024/04/22/reading-and-writing-files-in-swift-asyncawait/ -
+/// "I do not recommend using the `bytes` property to iterate one byte at a time") that its
+/// iterator performs a genuinely *blocking* kernel `read()` syscall on whatever thread drives
+/// it. Since that thread is one of Swift's small, fixed-size cooperative executor threads, not a
+/// dedicated one, enough simultaneously-blocked `RealByteSource` instances (e.g. several
+/// concurrent client sessions each waiting on their own peer) can exhaust the entire pool and
+/// starve unrelated work process-wide - a real deadlock, not just a busy loop.
 ///
-/// This split matters: an earlier version tried to decide "flush now or wait for more" by racing
-/// each individual byte-fetch against a timeout and cancelling the loser. That's unsafe —
-/// confirmed empirically (a 200k-value stress test lost ~30% of values) — because cancelling a
-/// `FileHandle.bytes` fetch that's genuinely mid-flight, then starting a new one, can race against
-/// it and silently drop data. Here the listener's fetch is *never* cancelled or raced against
-/// anything; only the flusher's `Task.sleep` gets cancelled once the listener reaches real EOF,
-/// which is harmless since a sleep has no data to lose. Also confirmed empirically (500k random
-/// bytes through a real pipe, bursty writer with deliberate gaps, run repeatedly) that this
-/// coalesces correctly with zero data loss, at a fraction of the per-byte task-spawn cost of the
-/// race-every-byte approach.
+/// A `DispatchSourceRead` only invokes its handler once the fd is actually readable, and the
+/// non-blocking `read()` inside that handler can't block even if the readiness signal turns out
+/// to be stale (POSIX readiness is a hint, not a guarantee - `EAGAIN`/`EWOULDBLOCK` just means
+/// wait for the next event). This also naturally coalesces: each event reads whatever's actually
+/// available (up to `maxChunkSize`) in one call, so unlike the old byte-at-a-time design, there's
+/// no separate fake-clock-driven flush heuristic needed here at all.
 ///
-/// `read()` itself is an actor, not just `Sendable`: `Relay` only ever calls it sequentially
-/// today, but a plain class with a "fresh iterator per call" body wouldn't actually be safe under
-/// *concurrent* callers - each call's local `AsyncStream` iterator races the others on the same
-/// underlying stream, and turning the type into a plain `actor` alone wouldn't fix that either,
-/// since actor reentrancy still lets a second `read()` start once the first suspends at its own
-/// `await`. The explicit turn-taking below (mirroring `RealByteSink`'s write-side back-pressure)
-/// is what actually guarantees only one `read()` is in flight at a time.
+/// `read()` itself is an actor, not just `Sendable`: only one caller is expected to drive a
+/// source's receive loop at a time, but a plain class with a "fresh iterator per call" body
+/// wouldn't actually be safe under *concurrent* callers - each call's local `AsyncStream`
+/// iterator races the others on the same underlying stream, and turning the type into a plain
+/// `actor` alone wouldn't fix that either, since actor reentrancy still lets a second `read()`
+/// start once the first suspends at its own `await`. The explicit turn-taking below (mirroring
+/// `RealByteSink`'s write-side back-pressure) is what actually guarantees only one `read()` is in
+/// flight at a time.
 public actor RealByteSource: ByteSource {
   private let stream: AsyncStream<Data>
   private var isReading = false
   private var waiters: [CheckedContinuation<Void, Never>] = []
 
-  public init(
-    fileDescriptor: Int32, coalesceWindow: Duration = .milliseconds(1), maxChunkSize: Int = 64 * 1024
-  ) {
-    let handle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: false)
+  public init(fileDescriptor: Int32, maxChunkSize: Int = 64 * 1024) {
     let (stream, continuation) = AsyncStream<Data>.makeStream()
     self.stream = stream
-    // A synchronous actor init can't access other actor-isolated members (only directly
-    // initialize its own stored properties), so this is a local @Dependency rather than an
-    // instance one - resolved once here, at bootstrap, and passed through explicitly since
-    // pump is a static func with no access to self anyway.
-    @Dependency(\.continuousClock) var clock
-    Task {
-      await Self.pump(
-        handle: handle, continuation: continuation, coalesceWindow: coalesceWindow, maxChunkSize: maxChunkSize, clock: clock)
-    }
+    Self.startReading(fileDescriptor: fileDescriptor, maxChunkSize: maxChunkSize, continuation: continuation)
   }
 
   public func read() async throws -> Data? {
@@ -81,107 +74,66 @@ public actor RealByteSource: ByteSource {
     waiters.removeFirst().resume()
   }
 
-  private static func pump(
-    handle: FileHandle, continuation: AsyncStream<Data>.Continuation, coalesceWindow: Duration, maxChunkSize: Int,
-    clock: any Clock<Duration>
-  ) async {
-    let buffer = CoalesceBuffer(continuation: continuation, maxChunkSize: maxChunkSize)
+  private static func startReading(fileDescriptor: Int32, maxChunkSize: Int, continuation: AsyncStream<Data>.Continuation) {
+    setNonBlocking(fileDescriptor)
 
-    await withTaskGroup(of: Void.self) { group in
-      group.addTask {
-        do {
-          for try await byte in handle.bytes {
-            await buffer.append(byte)
-          }
-        } catch {
-          // A read error ends the stream the same as EOF would; Relay surfaces the failure
-          // through whichever direction actually threw, not by propagating it out of here.
-        }
+    let queue = DispatchQueue(label: "bsp-mux.byte-source")
+    let source = DispatchSource.makeReadSource(fileDescriptor: fileDescriptor, queue: queue)
+
+    source.setEventHandler {
+      var chunk = [UInt8](repeating: 0, count: maxChunkSize)
+      let bytesRead = chunk.withUnsafeMutableBytes { raw in
+        cRead(fileDescriptor, raw.baseAddress, raw.count)
       }
-      group.addTask {
-        // Cancelled once the listener above finishes - safe, since a sleep has no in-flight
-        // read to lose, unlike cancelling the listener's own fetch would be.
-        while !Task.isCancelled {
-          try? await clock.sleep(for: coalesceWindow)
-          await buffer.flushIfIdleSinceLastCheck()
-        }
+      if bytesRead > 0 {
+        continuation.yield(Data(chunk[0..<bytesRead]))
+      } else if bytesRead == 0 {
+        source.cancel()  // EOF
+      } else if errno != EAGAIN && errno != EWOULDBLOCK {
+        source.cancel()  // A real read error - end the stream the same as EOF would.
       }
-      await group.next()  // only the listener can finish on its own - the flusher loops until cancelled
-      group.cancelAll()
+      // EAGAIN/EWOULDBLOCK: the readiness signal was stale - just wait for the next event.
     }
-
-    await buffer.flushRemaining()
-    continuation.finish()
+    source.setCancelHandler {
+      continuation.finish()
+    }
+    source.resume()
   }
 }
 
-/// The shared state `RealByteSource.pump`'s listener and flusher tasks coordinate through - an
-/// actor so appending a byte and checking/flushing on a timer can't race each other.
+/// Bridges a raw file descriptor's write direction into `ByteSink`, backed by a non-blocking fd
+/// and a `DispatchSourceWrite`, giving every caller genuine back-pressure — suspending until its
+/// turn rather than failing outright under contention. Unsynchronized concurrent writes to the
+/// same fd aren't just a queueing nicety to get right: POSIX only guarantees a `write()` is
+/// atomic (never interleaved with another writer) up to `PIPE_BUF` bytes, so anything larger
+/// genuinely can arrive on the wire garbled without this.
 ///
-/// "Idle" is tracked with a flag rather than an elapsed-time comparison against a clock
-/// `Instant`: the flusher's `sleep` already goes through the injected `Clock`, so this only
-/// needs to answer "did anything arrive during my last full sleep" - not how much, just
-/// whether. A flag also sidesteps needing to name a concrete `Instant` type for an existential
-/// `any Clock<Duration>` (its associated `Instant` is erased), and keeps this actor fully driven
-/// by `TestClock.advance` in tests rather than any real wall-clock reads.
-private actor CoalesceBuffer {
-  private var buffer = Data()
-  private var hasAppendedSinceLastCheck = false
-  private let continuation: AsyncStream<Data>.Continuation
-  private let maxChunkSize: Int
-
-  init(continuation: AsyncStream<Data>.Continuation, maxChunkSize: Int) {
-    self.continuation = continuation
-    self.maxChunkSize = maxChunkSize
-  }
-
-  func append(_ byte: UInt8) {
-    buffer.append(byte)
-    hasAppendedSinceLastCheck = true
-    if buffer.count >= maxChunkSize {
-      flush()
-    }
-  }
-
-  func flushIfIdleSinceLastCheck() {
-    guard !hasAppendedSinceLastCheck else {
-      hasAppendedSinceLastCheck = false
-      return
-    }
-    flush()
-  }
-
-  func flushRemaining() {
-    flush()
-  }
-
-  private func flush() {
-    guard !buffer.isEmpty else { return }
-    continuation.yield(buffer)
-    buffer = Data()
-  }
-}
-
-/// Bridges a raw file descriptor's write direction into `ByteSink`, giving every caller genuine
-/// back-pressure — suspending until its turn rather than failing outright under contention.
-/// Unsynchronized concurrent writes to the same fd aren't just a queueing nicety to get right:
-/// POSIX only guarantees a `write()` is atomic (never interleaved with another writer) up to
-/// `PIPE_BUF` bytes, so anything larger genuinely can arrive on the wire garbled without this.
+/// Non-blocking for the same reason `RealByteSource`'s read side is (see its doc comment) - and
+/// necessarily so, not just for symmetry: `RealDuplexByteStream` composes a `RealByteSource` and
+/// a `RealByteSink` over the *same* file descriptor, and `O_NONBLOCK` is a property of the
+/// underlying open file description, not scoped to one direction - confirmed empirically that
+/// setting it via one of them makes writes on that same fd non-blocking too. A write handler that
+/// still assumed blocking semantics would start seeing `EAGAIN`/partial writes under real
+/// backpressure instead of correctly waiting, so this loops on write-readiness events, retrying
+/// and tracking how much of the buffer has actually been sent, rather than a single blocking
+/// `write()` call.
+///
 /// An actor, one per file descriptor - callers writing to unrelated file descriptors get their
 /// own instance, so a slow write to one stream can never stall an unrelated one.
 public actor RealByteSink: ByteSink {
-  private let handle: FileHandle
+  private let fileDescriptor: Int32
   private var isWriting = false
   private var waiters: [CheckedContinuation<Void, Never>] = []
 
   public init(fileDescriptor: Int32) {
-    self.handle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: false)
+    self.fileDescriptor = fileDescriptor
+    setNonBlocking(fileDescriptor)
   }
 
   public func write(_ data: Data) async throws {
     await acquireTurn()
     defer { releaseTurn() }
-    try await performWrite(data)
+    try await Self.performWrite(data, to: fileDescriptor)
   }
 
   private func acquireTurn() async {
@@ -200,16 +152,66 @@ public actor RealByteSink: ByteSink {
     waiters.removeFirst().resume()
   }
 
-  private func performWrite(_ data: Data) async throws {
-    try await withCheckedThrowingContinuation { continuation in
-      DispatchQueue.global(qos: .userInitiated).async {
-        do {
-          try self.handle.write(contentsOf: data)
-          continuation.resume()
-        } catch {
+  private static func performWrite(_ data: Data, to fileDescriptor: Int32) async throws {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+      let queue = DispatchQueue(label: "bsp-mux.byte-sink")
+      let source = DispatchSource.makeWriteSource(fileDescriptor: fileDescriptor, queue: queue)
+      var remaining = data
+
+      // Only ever touched from source's own serial queue (setEventHandler/setCancelHandler are
+      // both invoked there, never concurrently), so this needs no separate synchronization.
+      nonisolated(unsafe) var writeError: Error?
+
+      source.setEventHandler {
+        let bytesWritten = remaining.withUnsafeBytes { raw in
+          cWrite(fileDescriptor, raw.baseAddress, raw.count)
+        }
+        if bytesWritten > 0 {
+          remaining.removeFirst(bytesWritten)
+          if remaining.isEmpty {
+            source.cancel()
+          }
+          // else: partial write - stay registered for the next writability event.
+        } else if bytesWritten < 0 && errno != EAGAIN && errno != EWOULDBLOCK {
+          writeError = ByteStreamError.errno("write", errno)
+          source.cancel()
+        }
+        // EAGAIN/EWOULDBLOCK: the readiness signal was stale - just wait for the next event.
+      }
+      source.setCancelHandler {
+        if let error = writeError {
           continuation.resume(throwing: error)
+        } else {
+          continuation.resume()
         }
       }
+      source.resume()
     }
+  }
+}
+
+private func setNonBlocking(_ fileDescriptor: Int32) {
+  let currentFlags = fcntl(fileDescriptor, F_GETFL, 0)
+  _ = fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK)
+}
+
+// `read`/`write` share a name with this file's own APIs; qualify the libc calls explicitly
+// rather than relying on overload resolution to sort it out (matching RealElectionEnvironment's
+// existing convention for the same problem with connect/bind/listen).
+#if canImport(Darwin)
+private func cRead(_ fd: Int32, _ buffer: UnsafeMutableRawPointer?, _ count: Int) -> Int { Darwin.read(fd, buffer, count) }
+private func cWrite(_ fd: Int32, _ buffer: UnsafeRawPointer?, _ count: Int) -> Int { Darwin.write(fd, buffer, count) }
+#elseif canImport(Glibc)
+private func cRead(_ fd: Int32, _ buffer: UnsafeMutableRawPointer?, _ count: Int) -> Int { Glibc.read(fd, buffer, count) }
+private func cWrite(_ fd: Int32, _ buffer: UnsafeRawPointer?, _ count: Int) -> Int { Glibc.write(fd, buffer, count) }
+#endif
+
+struct ByteStreamError: Swift.Error, CustomStringConvertible, Equatable {
+  let description: String
+}
+
+extension ByteStreamError {
+  static func errno(_ syscall: String, _ code: Int32) -> ByteStreamError {
+    ByteStreamError(description: "\(syscall) failed: \(String(cString: strerror(code))) (errno \(code))")
   }
 }
