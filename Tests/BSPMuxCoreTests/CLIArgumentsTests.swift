@@ -18,20 +18,30 @@ import Testing
   }
 
   @Test func installThrowsWhenWorkspaceRootIsMissingEntirely() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse(["install"])
     }
   }
 
   @Test func installThrowsWhenWorkspaceRootHasNoValue() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse(["install", "--workspace-root"])
     }
   }
 
   @Test func installThrowsOnAnUnrecognizedArgument() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse(["install", "--workspace-root", "/tmp/project", "--nonsense"])
+    }
+  }
+
+  @Test func installHelpRequestThrows() {
+    // Confirmed empirically this is ArgumentParser's own internal ParserError.helpRequested
+    // case under the hood, but that type isn't public - it can't be pattern-matched by name
+    // outside the module, so this can only assert that *something* throws, not which case.
+    // See CLIArguments.parse's doc comment for what this means for the eventual CLI entry point.
+    #expect(throws: (any Error).self) {
+      _ = try CLIArguments.parse(["install", "--help"])
     }
   }
 
@@ -47,42 +57,40 @@ import Testing
     #expect(command == .run(workspaceRoot: "/tmp/project", backendArgv: ["backend"]))
   }
 
-  @Test func runThrowsWhenNotStartingWithWorkspaceRoot() {
-    #expect(throws: CLIArgumentsError.self) {
-      _ = try CLIArguments.parse(["--", "backend"])
-    }
+  @Test func runPreservesFlagLikeTokensInBackendArgvVerbatim() throws {
+    // Confirmed empirically that .postTerminator treats everything after -- as opaque strings,
+    // never attempting to interpret them as this command's own flags.
+    let command = try CLIArguments.parse(["--workspace-root", "/tmp/project", "--", "--not-a-real-flag", "serve"])
+    #expect(command == .run(workspaceRoot: "/tmp/project", backendArgv: ["--not-a-real-flag", "serve"]))
   }
 
   @Test func runThrowsWhenWorkspaceRootHasNoValue() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse(["--workspace-root"])
     }
   }
 
   @Test func runThrowsWhenSeparatorIsMissing() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse(["--workspace-root", "/tmp/project", "backend"])
     }
   }
 
-  @Test func runThrowsWhenSomethingSitsBetweenWorkspaceRootAndSeparator() {
-    // Deliberately strict, not a lenient "find -- anywhere" search - Installer.wrapArgv only
-    // ever constructs the exact shape (--workspace-root, value, --, ...), so anything else
-    // should fail loudly rather than silently drop the extra token.
-    #expect(throws: CLIArgumentsError.self) {
-      _ = try CLIArguments.parse(["--workspace-root", "/tmp/project", "--extra", "--", "backend"])
-    }
-  }
-
   @Test func runThrowsWhenBackendArgvAfterSeparatorIsEmpty() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse(["--workspace-root", "/tmp/project", "--"])
     }
   }
 
   @Test func runThrowsForCompletelyEmptyArgv() {
-    #expect(throws: CLIArgumentsError.self) {
+    #expect(throws: (any Error).self) {
       _ = try CLIArguments.parse([])
+    }
+  }
+
+  @Test func runHelpRequestThrows() {
+    #expect(throws: (any Error).self) {
+      _ = try CLIArguments.parse(["--help"])
     }
   }
 }

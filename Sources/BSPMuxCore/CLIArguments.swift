@@ -1,3 +1,5 @@
+import ArgumentParser
+
 /// What `bsp-mux` was invoked to do, parsed from its own argv (excluding `argv[0]`, the
 /// executable path itself - callers already have that separately and it isn't meaningful to
 /// parsing logic).
@@ -11,74 +13,57 @@ public enum CLICommand: Sendable, Equatable {
   case run(workspaceRoot: String, backendArgv: [String])
 }
 
-public struct CLIArgumentsError: Swift.Error, CustomStringConvertible, Equatable {
-  public let description: String
-
-  public init(description: String) {
-    self.description = description
-  }
-}
-
-/// Parses `bsp-mux`'s own argv into a `CLICommand`. Deliberately pure string processing, no
-/// filesystem access - `--workspace-root`'s value is handed back as-is, with resolution (e.g.
-/// `realpath(3)`) staying where it already happens deeper in the stack (`ProjectKey`, via the
-/// injectable `fileSystem` seam), not duplicated here.
+/// Parses `bsp-mux`'s own argv into a `CLICommand`, via `ArgumentParser`.
+///
+/// Deliberately two fully independent `ParsableCommand`s with a manual "is it `install`?" check
+/// up front, rather than `ArgumentParser`'s own `subcommands:` mechanism - confirmed empirically
+/// that combining a root command's own arguments (needed for the bare, keyword-less "run" mode)
+/// with a declared subcommand causes real parsing bugs: the subcommand failed to dispatch at all
+/// once the root also declared a `.postTerminator` argument, and even without that, a shared
+/// option name between root and subcommand bound its value incorrectly. Two independent
+/// `ParsableCommand`s, each parsed directly via their own `.parse(_:)`, sidesteps both.
+///
+/// Errors propagate directly from `ArgumentParser` rather than being wrapped in a project-owned
+/// error type, to avoid discarding whatever information is actually there. Worth noting for
+/// whoever wires up the real CLI entry point later: a `--help`/`-h` request throws too (there's
+/// no successful, distinguishable "help was requested" return value from `.parse(_:)` the way
+/// there is from `.main()`), and confirmed empirically it's ArgumentParser's own internal
+/// `ParserError.helpRequested` case doing the throwing - not `public`, so it can't be pattern-
+/// matched by name outside the module. Presenting `--help` nicely (rather than as a generic
+/// parse failure) will need either catching this some other way or using a different entry
+/// point than `.parse(_:)` for that specific concern - left to the CLI entry point itself,
+/// since it doesn't affect `CLICommand`'s success path at all.
 public enum CLIArguments {
   public static func parse(_ argv: [String]) throws -> CLICommand {
     if argv.first == "install" {
-      return try parseInstall(Array(argv.dropFirst()))
+      let install = try InstallArguments.parse(Array(argv.dropFirst()))
+      return .install(workspaceRoot: install.workspaceRoot, force: install.force)
     }
-    return try parseRun(argv)
+    let run = try RunArguments.parse(argv)
+    return .run(workspaceRoot: run.workspaceRoot, backendArgv: run.backendArgv)
   }
+}
 
-  private static func parseInstall(_ argv: [String]) throws -> CLICommand {
-    var workspaceRoot: String?
-    var force = false
-    var index = argv.startIndex
+struct InstallArguments: ParsableCommand {
+  static let configuration = CommandConfiguration(commandName: "install")
 
-    while index < argv.endIndex {
-      switch argv[index] {
-      case "--workspace-root":
-        index = argv.index(after: index)
-        guard index < argv.endIndex else {
-          throw CLIArgumentsError(description: "--workspace-root requires a value")
-        }
-        workspaceRoot = argv[index]
-      case "--force":
-        force = true
-      case let unexpected:
-        throw CLIArgumentsError(description: "unrecognized argument to install: \(unexpected)")
-      }
-      index = argv.index(after: index)
-    }
+  @Option(name: .customLong("workspace-root"), help: "Absolute path to the directory containing buildServer.json.")
+  var workspaceRoot: String
 
-    guard let workspaceRoot else {
-      throw CLIArgumentsError(description: "install requires --workspace-root <path>")
-    }
-    return .install(workspaceRoot: workspaceRoot, force: force)
-  }
+  @Flag(name: .customLong("force"), help: "Re-wrap an already-wrapped buildServer.json instead of leaving it untouched.")
+  var force = false
+}
 
-  private static func parseRun(_ argv: [String]) throws -> CLICommand {
-    // Deliberately strict about the exact shape (--workspace-root, value, --, backend argv...)
-    // rather than searching for -- anywhere in argv: this is the one shape Installer.wrapArgv
-    // ever constructs, so anything else is a malformed invocation worth failing loudly on
-    // rather than silently tolerating.
-    guard argv.first == "--workspace-root" else {
-      throw CLIArgumentsError(description: "expected --workspace-root <path> -- <backend argv...>")
-    }
-    guard argv.count > 1 else {
-      throw CLIArgumentsError(description: "--workspace-root requires a value")
-    }
-    let workspaceRoot = argv[1]
+struct RunArguments: ParsableCommand {
+  @Option(name: .customLong("workspace-root"), help: "Absolute path to the project's workspace root.")
+  var workspaceRoot: String
 
-    guard argv.count > 2, argv[2] == "--" else {
-      throw CLIArgumentsError(description: "expected a -- separator after --workspace-root <path>")
-    }
-    let backendArgv = Array(argv[3...])
+  @Argument(parsing: .postTerminator, help: "The real backend's own argv, after --.")
+  var backendArgv: [String] = []
+
+  func validate() throws {
     guard !backendArgv.isEmpty else {
-      throw CLIArgumentsError(description: "backend argv (after --) must not be empty")
+      throw ValidationError("backend argv (after --) must not be empty")
     }
-
-    return .run(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
   }
 }

@@ -16,6 +16,7 @@ let package = Package(
     .package(url: "https://github.com/pointfreeco/swift-dependencies.git", from: "1.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-clocks.git", from: "1.0.0"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.0"),
+    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.0.0"),
   ],
   targets: [
     .target(
@@ -28,6 +29,7 @@ let package = Package(
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "Clocks", package: "swift-clocks"),
         .product(name: "Subprocess", package: "swift-subprocess"),
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
     .executableTarget(
