@@ -15,33 +15,43 @@ public enum CLICommand: Sendable, Equatable {
 
 /// Parses `bsp-mux`'s own argv into a `CLICommand`, via `ArgumentParser`.
 ///
-/// Deliberately two fully independent `ParsableCommand`s with a manual "is it `install`?" check
-/// up front, rather than `ArgumentParser`'s own `subcommands:` mechanism - confirmed empirically
-/// that combining a root command's own arguments (needed for the bare, keyword-less "run" mode)
-/// with a declared subcommand causes real parsing bugs: the subcommand failed to dispatch at all
-/// once the root also declared a `.postTerminator` argument, and even without that, a shared
-/// option name between root and subcommand bound its value incorrectly. Two independent
-/// `ParsableCommand`s, each parsed directly via their own `.parse(_:)`, sidesteps both.
-///
-/// Errors propagate directly from `ArgumentParser` rather than being wrapped in a project-owned
-/// error type, to avoid discarding whatever information is actually there. Worth noting for
-/// whoever wires up the real CLI entry point later: a `--help`/`-h` request throws too (there's
-/// no successful, distinguishable "help was requested" return value from `.parse(_:)` the way
-/// there is from `.main()`), and confirmed empirically it's ArgumentParser's own internal
-/// `ParserError.helpRequested` case doing the throwing - not `public`, so it can't be pattern-
-/// matched by name outside the module. Presenting `--help` nicely (rather than as a generic
-/// parse failure) will need either catching this some other way or using a different entry
-/// point than `.parse(_:)` for that specific concern - left to the CLI entry point itself,
-/// since it doesn't affect `CLICommand`'s success path at all.
+/// `RunArguments` is `defaultSubcommand` on the root rather than declaring its own arguments
+/// directly on the root command alongside `subcommands:` (an earlier version of this file tried
+/// that) - confirmed empirically that combining a root command's own arguments with a declared
+/// subcommand causes real parsing bugs: the subcommand failed to dispatch at all once the root
+/// also declared a `.postTerminator` argument, and even without that, a shared option name
+/// between root and subcommand bound its value incorrectly. `defaultSubcommand` is
+/// `ArgumentParser`'s own documented mechanism for exactly this "no keyword, fall through to
+/// this command's own arguments" shape, and confirmed empirically it dispatches correctly even
+/// with zero subcommand keyword present in argv at all - it's the version actually used here.
 public enum CLIArguments {
   public static func parse(_ argv: [String]) throws -> CLICommand {
-    if argv.first == "install" {
-      let install = try InstallArguments.parse(Array(argv.dropFirst()))
+    let parsed = try RootArguments.parseAsRoot(argv)
+    switch parsed {
+    case let install as InstallArguments:
       return .install(workspaceRoot: install.workspaceRoot, force: install.force)
+    case let run as RunArguments:
+      return .run(workspaceRoot: run.workspaceRoot, backendArgv: run.backendArgv)
+    default:
+      // Neither of ours - some other built-in ArgumentParser behavior took over instead (a
+      // --help/-h request, most likely, but not provably only that - ArgumentParser also
+      // auto-adds e.g. shell-completion-script generation). Confirmed empirically that
+      // CleanExit.helpRequest(_:) is a genuinely public, nameable type constructible from just
+      // the parsed value, unlike the internal error types ArgumentParser itself throws for this
+      // case - giving whoever wires up the real CLI entry point something concrete to catch and
+      // exit(0) on, rather than a completely opaque failure. Rendering the actual help text
+      // nicely is a separate concern, left for that entry point to solve.
+      throw CleanExit.helpRequest(parsed)
     }
-    let run = try RunArguments.parse(argv)
-    return .run(workspaceRoot: run.workspaceRoot, backendArgv: run.backendArgv)
   }
+}
+
+struct RootArguments: ParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "bsp-mux",
+    subcommands: [InstallArguments.self, RunArguments.self],
+    defaultSubcommand: RunArguments.self
+  )
 }
 
 struct InstallArguments: ParsableCommand {
@@ -55,6 +65,8 @@ struct InstallArguments: ParsableCommand {
 }
 
 struct RunArguments: ParsableCommand {
+  static let configuration = CommandConfiguration(commandName: "run")
+
   @Option(name: .customLong("workspace-root"), help: "Absolute path to the project's workspace root.")
   var workspaceRoot: String
 

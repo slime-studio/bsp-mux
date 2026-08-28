@@ -48,6 +48,7 @@ let package = Package(
       dependencies: [
         "BSPMuxCore",
         .product(name: "Clocks", package: "swift-clocks"),
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
     .testTarget(

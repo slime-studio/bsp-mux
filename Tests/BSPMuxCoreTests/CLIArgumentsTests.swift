@@ -1,3 +1,4 @@
+import ArgumentParser
 import Testing
 
 @testable import BSPMuxCore
@@ -36,11 +37,7 @@ import Testing
   }
 
   @Test func installHelpRequestThrows() {
-    // Confirmed empirically this is ArgumentParser's own internal ParserError.helpRequested
-    // case under the hood, but that type isn't public - it can't be pattern-matched by name
-    // outside the module, so this can only assert that *something* throws, not which case.
-    // See CLIArguments.parse's doc comment for what this means for the eventual CLI entry point.
-    #expect(throws: (any Error).self) {
+    #expect(throws: CleanExit.self) {
       _ = try CLIArguments.parse(["install", "--help"])
     }
   }
@@ -89,7 +86,7 @@ import Testing
   }
 
   @Test func runHelpRequestThrows() {
-    #expect(throws: (any Error).self) {
+    #expect(throws: CleanExit.self) {
       _ = try CLIArguments.parse(["--help"])
     }
   }
