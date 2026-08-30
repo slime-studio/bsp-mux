@@ -23,6 +23,16 @@ import Testing
     return try JSONRPCEnvelope(rawBytes: raw)
   }
 
+  /// Polls `condition` via `Task.yield()` instead of a fixed sleep, for synchronizing with
+  /// concurrently-running `async let` work whose progress isn't tied to a controllable clock -
+  /// mirrors `DaemonLifecycleTests`' own copy of this helper.
+  static func waitUntil(_ condition: @Sendable () async -> Bool, attempts: Int = 1000) async {
+    for _ in 0..<attempts {
+      if await condition() { return }
+      await Task.yield()
+    }
+  }
+
   @Test func requestGetsRewrittenIdAndResponseComesBackWithOriginalId() async throws {
     let backend = FakeDuplexChannel()
     let clientChannel = FakeDuplexChannel()
@@ -216,5 +226,75 @@ import Testing
     }
 
     #expect(await backend.sentMessages.isEmpty)
+  }
+
+  @Test func backendDisconnectedFailsInFlightRequestsAcrossEverySessionAndResolvesShutdown() async throws {
+    let backend = FakeDuplexChannel()
+    let channelA = FakeDuplexChannel()
+    let channelB = FakeDuplexChannel()
+    let daemon = Daemon(backend: backend)
+    let sessionA = await daemon.registerSession(channel: channelA)
+    let sessionB = await daemon.registerSession(channel: channelB)
+
+    try await daemon.handleClientMessage(from: sessionA, envelope: Self.request(id: #""abc""#, method: "buildTarget/sources"))
+    try await daemon.handleClientMessage(from: sessionB, envelope: Self.request(id: #""xyz""#, method: "buildTarget/compile"))
+    #expect(await backend.sentMessages.count == 2)  // both in flight, backend never answers either
+
+    async let shutdown: Void = daemon.waitForShutdown()
+    await daemon.handleBackendDisconnected()
+    await shutdown
+
+    let toA = await channelA.sentMessages
+    let toB = await channelB.sentMessages
+    #expect(toA.count == 1)
+    #expect(toB.count == 1)
+    let replyA = try JSONRPCEnvelope(rawBytes: toA[0])
+    let replyB = try JSONRPCEnvelope(rawBytes: toB[0])
+    #expect(replyA.id == JSONRPCRawID(rawText: #""abc""#))
+    #expect(replyB.id == JSONRPCRawID(rawText: #""xyz""#))
+    let replyAString = String(bytes: replyA.rawBytes, encoding: .utf8)
+    let replyBString = String(bytes: replyB.rawBytes, encoding: .utf8)
+    #expect(replyAString?.contains(#""error""#) == true)
+    #expect(replyBString?.contains(#""error""#) == true)
+  }
+
+  @Test func backendDisconnectedFailsAnInFlightInitializeRoundTrip() async throws {
+    let backend = FakeDuplexChannel()
+    let clientChannel = FakeDuplexChannel()
+    let daemon = Daemon(backend: backend)
+    let session = await daemon.registerSession(channel: clientChannel)
+
+    // handleClientMessage suspends inside handleInitialize awaiting the backend's answer, so
+    // drive it from a concurrent task and let handleBackendDisconnected resolve it instead of
+    // ever getting a real response. Mirrors DaemonLifecycleTests' own
+    // singleClientInitializeForwardsOnceAndCachesTheResponse, which relies on the same
+    // sentMessages-non-empty checkpoint to know the pending continuation is actually in place.
+    async let initializeCall: Void = {
+      do {
+        try await daemon.handleClientMessage(from: session, envelope: Self.request(id: "1", method: "build/initialize"))
+      } catch {
+        // Expected: the backend disconnecting fails this in-flight round trip.
+      }
+    }()
+
+    await Self.waitUntil { await !backend.sentMessages.isEmpty }
+    await daemon.handleBackendDisconnected()
+    await initializeCall
+
+    // No response was ever sent to the client for this request - it's the pending Task's own
+    // continuation that fails, not something surfaced through the normal reply path (the client
+    // finds out because the whole daemon is exiting right after, per handleBackendDisconnected's
+    // doc comment).
+    #expect(await clientChannel.sentMessages.isEmpty)
+  }
+
+  @Test func backendDisconnectedIsIdempotent() async throws {
+    let backend = FakeDuplexChannel()
+    let daemon = Daemon(backend: backend)
+
+    await daemon.handleBackendDisconnected()
+    await daemon.handleBackendDisconnected()  // must not double-resume waitForShutdown's continuations
+
+    await daemon.waitForShutdown()
   }
 }

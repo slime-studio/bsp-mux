@@ -218,11 +218,45 @@ public actor Daemon {
     // backend already died) doesn't change that.
     try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
     try? await backend.send(BSPMessages.exitNotificationData())
+    markShutDown()
+  }
 
+  /// The backend connection itself ended (crashed, or its own channel erroring/EOF-ing) -
+  /// per DESIGN.md: "fail all in-flight requests across every connected session, close
+  /// everything, unlink the socket, and exit." This handles the parts that are this actor's own
+  /// state to resolve - failing whatever was waiting on a backend answer that will now never
+  /// come, and ending the daemon's life the same way a normal idle-timeout shutdown does, so
+  /// `waitForShutdown()` callers aren't left hanging forever. Actually closing sessions' own
+  /// channels/fds and unlinking the socket file is the caller's job once this returns (this
+  /// actor never owned that fd-level state to begin with) - the process exiting shortly after
+  /// reclaims it regardless. The next client action naturally re-elects a fresh daemon rather
+  /// than this one trying to respawn the backend in place.
+  public func handleBackendDisconnected() async {
+    guard !hasShutDown else { return }
+
+    for (session, originalID) in pendingRequests.values {
+      try? await sessions[session]?.send(BSPMessages.backendDisconnectedErrorResponse(id: originalID))
+    }
+    pendingRequests.removeAll()
+
+    pendingInitializeContinuation?.resume(throwing: BackendDisconnectedError())
+    pendingInitializeContinuation = nil
+    pendingInitializeBackendID = nil
+
+    markShutDown()
+  }
+
+  private func markShutDown() {
     hasShutDown = true
     for continuation in shutdownContinuations {
       continuation.resume()
     }
     shutdownContinuations.removeAll()
   }
+}
+
+public struct BackendDisconnectedError: Swift.Error, CustomStringConvertible, Equatable {
+  public var description: String { "the build server process disconnected unexpectedly" }
+
+  public init() {}
 }
