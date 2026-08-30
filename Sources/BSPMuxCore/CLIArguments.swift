@@ -44,6 +44,15 @@ public enum CLIArguments {
       throw CleanExit.helpRequest(parsed)
     }
   }
+
+  /// Terminates the process with `ArgumentParser`'s own usage/help rendering and exit code for
+  /// `error` - what `parse(_:)`'s thrown `CleanExit.helpRequest`/`ValidationError` (or any
+  /// runtime error from actually running the parsed command) should be passed to. `RootArguments`
+  /// is internal to this module, so this is the only way an external caller reaches its
+  /// `exit(withError:)`.
+  public static func exit(withError error: Swift.Error) -> Never {
+    RootArguments.exit(withError: error)
+  }
 }
 
 struct RootArguments: ParsableCommand {
