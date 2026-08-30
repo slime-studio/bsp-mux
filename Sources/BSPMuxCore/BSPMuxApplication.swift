@@ -10,7 +10,13 @@ public protocol BSPMuxApplication: Sendable {
   @discardableResult
   func install(workspaceRoot: String, multiplexerExecutable: String, force: Bool) throws -> InstallResult
 
-  func run(workspaceRoot: String, backendArgv: [String]) async throws
+  /// `standardIn`/`standardOut` are the winner-or-relay's own stdio - passed in per call, not
+  /// stored, so a caller that never reaches `.run` (e.g. `install`) never pays for constructing
+  /// them. Protocol requirements can't carry default argument values, so the CLI entry point
+  /// (`main.swift`) is what actually supplies real fds - matching `RelaySession.run`'s own
+  /// existing convention that fd 0/1 wiring belongs to whoever constructs a real process, not to
+  /// the type doing the work.
+  func run(workspaceRoot: String, backendArgv: [String], standardIn: any ByteSource, standardOut: any ByteSink) async throws
 }
 
 /// The one production implementation of `BSPMuxApplication`: orchestrates `Installer`,
@@ -20,27 +26,16 @@ public protocol BSPMuxApplication: Sendable {
 /// `RealBackendSpawning`, ...) even though this sits on the driving side - it's still "the real
 /// one" as opposed to whatever a test constructs in its place.
 public struct RealBSPMuxApplication: BSPMuxApplication {
-  private let standardIn: any ByteSource
-  private let standardOut: any ByteSink
-
-  /// `standardIn`/`standardOut` default to real fds 0/1 but are injectable, mirroring
-  /// `RelaySession.run`'s own existing convention - so tests can supply pipe-backed streams
-  /// instead of hijacking the test runner's own stdio, rather than this being the first
-  /// I/O-touching type in the module with no seam for tests at all.
-  public init(
-    standardIn: any ByteSource = RealByteSource(fileDescriptor: 0),
-    standardOut: any ByteSink = RealByteSink(fileDescriptor: 1)
-  ) {
-    self.standardIn = standardIn
-    self.standardOut = standardOut
-  }
+  public init() {}
 
   @discardableResult
   public func install(workspaceRoot: String, multiplexerExecutable: String, force: Bool) throws -> InstallResult {
     try Installer().install(workspaceRoot: workspaceRoot, multiplexerExecutable: multiplexerExecutable, force: force)
   }
 
-  public func run(workspaceRoot: String, backendArgv: [String]) async throws {
+  public func run(
+    workspaceRoot: String, backendArgv: [String], standardIn: any ByteSource, standardOut: any ByteSink
+  ) async throws {
     let key = ProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
     let paths = ProjectPaths(key: key)
     try paths.ensureBaseDirectoryExists()

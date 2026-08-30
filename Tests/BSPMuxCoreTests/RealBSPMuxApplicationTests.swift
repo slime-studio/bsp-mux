@@ -88,14 +88,17 @@ import Testing
   @Test func relayOutcomePumpsBytesBetweenInjectedStdioAndTheLiveDaemonSocket() async throws {
     try await Self.withConnectedSocketPair { clientConnection, serverConnection in
       let io = PipeStandardIO()
-      let application = RealBSPMuxApplication(standardIn: io.standardIn, standardOut: io.standardOut)
+      let application = RealBSPMuxApplication()
       let environment = FakeElectionEnvironment(connectResults: [.success(clientConnection)])
 
       async let run: Void = withDependencies {
         $0.electionEnvironment = environment
         $0.fileSystem = InMemoryFileSystem()
       } operation: {
-        try await application.run(workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"])
+        try await application.run(
+          workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"],
+          standardIn: io.standardIn, standardOut: io.standardOut
+        )
       }
 
       let serverSource = RealByteSource(fileDescriptor: serverConnection.fileDescriptor)
@@ -129,7 +132,7 @@ import Testing
     let backend = FakeDuplexChannel(remainsOpenWhenExhausted: true)
     let spawning = FakeBackendSpawning(results: [.success(backend)])
     let io = PipeStandardIO()
-    let application = RealBSPMuxApplication(standardIn: io.standardIn, standardOut: io.standardOut)
+    let application = RealBSPMuxApplication()
     let environment = FakeElectionEnvironment(
       connectResults: [.absent],
       lockResults: [.acquired(LockHandle(fileDescriptor: 999))]
@@ -145,7 +148,10 @@ import Testing
       $0.backendSpawning = spawning
       $0.continuousClock = TestClock()
     } operation: {
-      try await application.run(workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend", "serve"])
+      try await application.run(
+        workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend", "serve"],
+        standardIn: io.standardIn, standardOut: io.standardOut
+      )
     }
 
     let initializeRequestJSON =
