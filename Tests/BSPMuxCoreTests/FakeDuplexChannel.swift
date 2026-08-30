@@ -17,6 +17,8 @@ import Foundation
 /// the explicit opt-in counterpart - only meaningful (and only needed) when this flag is set.
 actor FakeDuplexChannel: DuplexChannel {
   private(set) var sentMessages: [Data] = []
+  private var nextUnclaimedSentIndex = 0
+  private var sentMessageWaiters: [CheckedContinuation<Void, Never>] = []
   private var pendingIncoming: [Data] = []
   private var readError: Error?
   private let remainsOpenWhenExhausted: Bool
@@ -30,6 +32,27 @@ actor FakeDuplexChannel: DuplexChannel {
 
   func send(_ body: Data) async throws {
     sentMessages.append(body)
+    wakeSentMessageWaiters()
+  }
+
+  /// Suspends until the next not-yet-claimed message reaches `send()`, then returns it -
+  /// mirrors `receive()`'s own waiter pattern but for the outbound direction, so a test can
+  /// `await` a specific send (e.g. `Daemon` forwarding a request to the backend) instead of
+  /// polling `sentMessages` on a timer against `DaemonBootstrap`'s detached background loops.
+  /// Calls are FIFO across the whole channel, not per-caller - fine for every current caller,
+  /// which awaits its own messages one at a time in order.
+  func waitForNextSentMessage() async -> Data {
+    while nextUnclaimedSentIndex >= sentMessages.count {
+      await withCheckedContinuation { sentMessageWaiters.append($0) }
+    }
+    defer { nextUnclaimedSentIndex += 1 }
+    return sentMessages[nextUnclaimedSentIndex]
+  }
+
+  private func wakeSentMessageWaiters() {
+    let toWake = sentMessageWaiters
+    sentMessageWaiters = []
+    for waiter in toWake { waiter.resume() }
   }
 
   func receive() async throws -> Data? {

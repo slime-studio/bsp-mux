@@ -6,19 +6,6 @@ import Testing
 @testable import BSPMuxCore
 
 @Suite struct DaemonBootstrapTests {
-  /// Polls `condition` for synchronizing with `DaemonBootstrap`'s detached background loops.
-  /// Unlike `DaemonLifecycleTests`' `waitUntil` (which polls via `Task.yield()` to synchronize
-  /// with `async let` *child* tasks), this needs a real `Task.sleep` between checks - confirmed
-  /// empirically that `Task.yield()` alone doesn't reliably get an *unstructured* `Task { }`
-  /// (what `DaemonBootstrap` spawns for its background loops) scheduled here, while a short
-  /// sleep does.
-  static func waitUntil(_ condition: @Sendable () async -> Bool, attempts: Int = 200) async {
-    for _ in 0..<attempts {
-      if await condition() { return }
-      try? await Task.sleep(for: .milliseconds(10))
-    }
-  }
-
   /// A `Task { }` created inside `operation` captures the overridden dependencies at creation
   /// time and keeps them for its own full lifetime, independent of `withDependencies`' own
   /// dynamic scope ending - the same reasoning `RealBackendSpawning.spawn`'s own detached task
@@ -94,8 +81,8 @@ import Testing
 
     // The daemon mints backend-facing request ids starting at "0" - deterministic, since this
     // is the very first request this Daemon instance ever forwards.
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
-    let forwarded = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0])
+    let forwardedBytes = await backend.waitForNextSentMessage()
+    let forwarded = try JSONRPCEnvelope(rawBytes: forwardedBytes)
     #expect(forwarded.method == "build/initialize")
 
     // rawText already carries whatever raw JSON representation the id used (mintBackendRequestID
@@ -106,8 +93,8 @@ import Testing
         .utf8)
     await backend.enqueueIncoming(backendResponse)
 
-    await Self.waitUntil { await !winnerChannel.sentMessages.isEmpty }
-    let reply = try JSONRPCEnvelope(rawBytes: await winnerChannel.sentMessages[0])
+    let replyBytes = await winnerChannel.waitForNextSentMessage()
+    let reply = try JSONRPCEnvelope(rawBytes: replyBytes)
     #expect(reply.id == JSONRPCRawID(rawText: #""1""#))  // the original request's id was the JSON string "1"
 
     await backend.finishIncoming()

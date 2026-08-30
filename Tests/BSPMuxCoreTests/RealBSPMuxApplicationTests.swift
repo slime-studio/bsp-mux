@@ -6,16 +6,6 @@ import Testing
 @testable import BSPMuxCore
 
 @Suite struct RealBSPMuxApplicationTests {
-  /// Mirrors `DaemonBootstrapTests`' own helper: polls for `DaemonBootstrap`'s detached
-  /// background loops to make progress, since `Task.yield()` alone doesn't reliably schedule
-  /// them (only a real `Task.sleep` between checks does, confirmed empirically there).
-  static func waitUntil(_ condition: @Sendable () async -> Bool, attempts: Int = 200) async {
-    for _ in 0..<attempts {
-      if await condition() { return }
-      try? await Task.sleep(for: .milliseconds(10))
-    }
-  }
-
   /// Real OS pipes standing in for a process's own stdin/stdout, mirroring
   /// `RelaySessionTests.PipeStandardIO` - each retained via its owning `Pipe` (a `FileHandle`
   /// closes its fd on dealloc, so the `Pipe` itself must outlive the fds derived from it).
@@ -159,8 +149,8 @@ import Testing
       + #""bspVersion":"2.1.0","rootUri":"file:///workspace","capabilities":{}}}"#
     try await io.writeToStandardIn.write(MessageFraming.frame(Data(initializeRequestJSON.utf8)))
 
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
-    let forwarded = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0])
+    let forwardedBytes = await backend.waitForNextSentMessage()
+    let forwarded = try JSONRPCEnvelope(rawBytes: forwardedBytes)
     #expect(forwarded.method == "build/initialize")
 
     let backendResponse = Data(
