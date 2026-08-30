@@ -46,7 +46,7 @@ import Testing
     let outcome = try await Self.run(election, environment: env)
 
     #expect(outcome == .relay(handle))
-    #expect(env.calls == ["connect"])
+    #expect(env.calls == ["connect", "ignoreSIGPIPE"])
   }
 
   @Test func connectFailsThenLockAcquiredBecomesDaemonInCorrectOrder() async throws {
@@ -78,7 +78,7 @@ import Testing
     let outcome = try await Self.run(election, environment: env)
 
     #expect(outcome == .relay(handle))
-    #expect(env.calls == ["connect", "acquireLock", "connect"])
+    #expect(env.calls == ["connect", "acquireLock", "connect", "ignoreSIGPIPE"])
   }
 
   @Test func connectFailsAndLockContendedThenLockFreesUpBecomesDaemon() async throws {

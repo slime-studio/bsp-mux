@@ -40,6 +40,12 @@ public struct Election: Sendable {
   public func run() async throws -> ElectionOutcome {
     while true {
       if let connection = try environment.connect(to: paths.socketPath) {
+        // A relay pumps bytes in both directions for its whole life, so it hits broken-pipe
+        // writes routinely during ordinary teardown (the editor closing stdout mid-write, the
+        // daemon closing the socket mid-write) - without this, the default SIGPIPE disposition
+        // kills the process outright instead of surfacing a catchable error the same way the
+        // daemon side already relies on.
+        environment.ignoreSIGPIPE()
         return .relay(connection)
       }
 
