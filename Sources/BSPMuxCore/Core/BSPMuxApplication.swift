@@ -44,14 +44,13 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
     case .relay(let connection):
       try await RelaySession.run(connection: connection, standardIn: standardIn, standardOut: standardOut)
 
-    case .daemon:
-      // The listening socket's accept loop for subsequent clients is a separate, later piece
-      // (see DaemonBootstrap's doc comment) - not wired up yet, so this winner's own session is
-      // the only one served today. The lock's fd is deliberately never closed here either (see
-      // ElectionEnvironment's doc comment - process exit is the only correct release).
+    case .daemon(let listening, _):
+      // The lock's fd is deliberately never closed here (see ElectionEnvironment's doc comment -
+      // process exit is the only correct release); same rule for `listening`'s fd (see
+      // AcceptLoop's doc comment).
       let winnerChannel = FramedDuplexChannel(source: standardIn, sink: standardOut)
       let daemon = try await DaemonBootstrap.start(
-        argv: backendArgv, workspaceRoot: workspaceRoot, winnerChannel: winnerChannel
+        argv: backendArgv, workspaceRoot: workspaceRoot, listening: listening, winnerChannel: winnerChannel
       )
       await daemon.waitForShutdown()
     }
