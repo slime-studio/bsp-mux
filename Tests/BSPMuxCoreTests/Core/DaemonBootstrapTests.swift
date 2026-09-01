@@ -15,10 +15,13 @@ import Testing
   /// reads the real (unimplemented-in-tests) clock and traps, exactly like
   /// `DaemonTests`/`ClientSessionLoopTests` already have to guard against for the same reason.
   static func withTestDependencies<R>(
-    backendSpawning: FakeBackendSpawning, operation: () async throws -> R
+    backendSpawning: FakeBackendSpawning,
+    socketAccepting: FakeSocketAccepting = FakeSocketAccepting(),
+    operation: () async throws -> R
   ) async rethrows -> R {
     try await withDependencies {
       $0.backendSpawning = backendSpawning
+      $0.socketAccepting = socketAccepting
       $0.continuousClock = TestClock()
     } operation: {
       try await operation()
@@ -32,7 +35,8 @@ import Testing
 
     _ = try await Self.withTestDependencies(backendSpawning: spawning) {
       try await DaemonBootstrap.start(
-        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project", winnerChannel: winnerChannel
+        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project",
+        listening: ListeningHandle(fileDescriptor: 999), winnerChannel: winnerChannel
       )
     }
 
@@ -50,7 +54,10 @@ import Testing
 
     await #expect(throws: BackendSpawnError.self) {
       try await Self.withTestDependencies(backendSpawning: spawning) {
-        try await DaemonBootstrap.start(argv: ["/nonexistent"], workspaceRoot: "/tmp/project", winnerChannel: winnerChannel)
+        try await DaemonBootstrap.start(
+          argv: ["/nonexistent"], workspaceRoot: "/tmp/project",
+          listening: ListeningHandle(fileDescriptor: 999), winnerChannel: winnerChannel
+        )
       }
     }
 
@@ -75,7 +82,8 @@ import Testing
 
     _ = try await Self.withTestDependencies(backendSpawning: spawning) {
       try await DaemonBootstrap.start(
-        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project", winnerChannel: winnerChannel
+        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project",
+        listening: ListeningHandle(fileDescriptor: 999), winnerChannel: winnerChannel
       )
     }
 
@@ -108,7 +116,8 @@ import Testing
 
     let daemon = try await Self.withTestDependencies(backendSpawning: spawning) {
       try await DaemonBootstrap.start(
-        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project", winnerChannel: winnerChannel
+        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project",
+        listening: ListeningHandle(fileDescriptor: 999), winnerChannel: winnerChannel
       )
     }
 
@@ -116,6 +125,56 @@ import Testing
     await backend.finishIncoming()
     await daemon.waitForShutdown()
 
+    await winnerChannel.finishIncoming()
+  }
+
+  @Test func acceptedConnectionsAreActuallyWiredNotJustConstructed() async throws {
+    // Proves DaemonBootstrap really SPAWNS AcceptLoop against the real Daemon/backend it just
+    // built, not just that AcceptLoop works in isolation (AcceptLoopTests already covers that) -
+    // mirrors winnersInitializeRoundTripsThroughTheRealDaemonWiring's own "prove real wiring"
+    // philosophy, just for the accept-loop path instead of the winner's own session.
+    let path = "/tmp/bsp-mux-daemon-bootstrap-accept-test-\(UUID().uuidString).sock"
+    defer { unlink(path) }
+    let realEnvironment = RealElectionEnvironment()
+    let listening = try realEnvironment.listen(at: path)
+    defer { close(listening.fileDescriptor) }
+
+    async let accepted = RealSocketAccepting().accept(on: listening)
+    guard let clientConnection = try realEnvironment.connect(to: path) else {
+      Issue.record("expected connect() to succeed against a live listener")
+      return
+    }
+    let serverConnection = try await accepted
+
+    let backend = FakeDuplexChannel(remainsOpenWhenExhausted: true)
+    let winnerChannel = FakeDuplexChannel(remainsOpenWhenExhausted: true)
+    let spawning = FakeBackendSpawning(results: [.success(backend)])
+    let accepting = FakeSocketAccepting(results: [.success(serverConnection)])
+
+    _ = try await Self.withTestDependencies(backendSpawning: spawning, socketAccepting: accepting) {
+      try await DaemonBootstrap.start(
+        argv: ["/usr/bin/backend", "serve"], workspaceRoot: "/tmp/project",
+        listening: listening, winnerChannel: winnerChannel
+      )
+    }
+
+    let clientStream = RealDuplexByteStream(fileDescriptor: clientConnection.fileDescriptor)
+    let clientChannel = FramedDuplexChannel(source: clientStream, sink: clientStream)
+    try await clientChannel.send(Data(#"{"jsonrpc":"2.0","id":"7","method":"buildTarget/sources","params":{}}"#.utf8))
+
+    let forwardedBytes = await backend.waitForNextSentMessage()
+    let forwarded = try JSONRPCEnvelope(rawBytes: forwardedBytes)
+    #expect(forwarded.method == "buildTarget/sources")
+
+    let backendResponse = Data(#"{"jsonrpc":"2.0","id":\#(forwarded.id!.rawText),"result":{}}"#.utf8)
+    await backend.enqueueIncoming(backendResponse)
+
+    let replyBytes = try await clientChannel.receive()
+    let reply = try JSONRPCEnvelope(rawBytes: try #require(replyBytes))
+    #expect(reply.id == JSONRPCRawID(rawText: #""7""#))
+
+    close(clientConnection.fileDescriptor)
+    await backend.finishIncoming()
     await winnerChannel.finishIncoming()
   }
 }

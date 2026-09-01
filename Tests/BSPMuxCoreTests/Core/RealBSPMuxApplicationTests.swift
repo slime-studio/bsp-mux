@@ -136,6 +136,7 @@ import Testing
       $0.electionEnvironment = environment
       $0.fileSystem = InMemoryFileSystem()
       $0.backendSpawning = spawning
+      $0.socketAccepting = FakeSocketAccepting()
       $0.continuousClock = TestClock()
     } operation: {
       try await application.run(
