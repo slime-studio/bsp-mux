@@ -1,4 +1,11 @@
+import Dependencies
 import Foundation
+
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// What `bsp-mux`'s CLI drives: install a project's `buildServer.json`, or actually run
 /// (become the daemon or relay to one) — the "driving port" side of the hexagon, mirroring the
@@ -52,7 +59,23 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
       let daemon = try await DaemonBootstrap.start(
         argv: backendArgv, workspaceRoot: workspaceRoot, listening: listening, winnerChannel: winnerChannel
       )
+
+      // Scoped to exactly the daemon's lifetime - a relay process has no persistent resources of
+      // its own (no socket, no held lock), so default OS disposition on SIGTERM/SIGINT already
+      // closes its fds via ordinary process death, which the daemon on the other end handles as
+      // an ordinary client disconnect. No guard against this firing right as `waitForShutdown()`
+      // below also resolves naturally: harmless in production, since whichever `DaemonTeardown`
+      // call reaches `exit()` first actually ends the process before the other could matter.
+      @Dependency(\.signalHandling) var signalHandling
+      signalHandling.onSignal(SIGTERM) {
+        Task { await DaemonTeardown.run(reason: .signal(SIGTERM), socketPath: paths.socketPath) }
+      }
+      signalHandling.onSignal(SIGINT) {
+        Task { await DaemonTeardown.run(reason: .signal(SIGINT), socketPath: paths.socketPath) }
+      }
+
       await daemon.waitForShutdown()
+      await DaemonTeardown.run(reason: .normal, socketPath: paths.socketPath)
     }
   }
 }
