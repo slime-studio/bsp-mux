@@ -127,6 +127,8 @@ import Testing
       connectResults: [.absent],
       lockResults: [.acquired(LockHandle(fileDescriptor: 999))]
     )
+    let fileSystem = InMemoryFileSystem()
+    let processExiting = FakeProcessExiting()
 
     // A `Task { }` created inside `operation` (DaemonBootstrap's detached background loops)
     // captures these overridden dependencies at creation time and keeps them for its own full
@@ -134,10 +136,12 @@ import Testing
     // `DaemonBootstrapTests.withTestDependencies`'s own reasoning for the same setup.
     async let run: Void = withDependencies {
       $0.electionEnvironment = environment
-      $0.fileSystem = InMemoryFileSystem()
+      $0.fileSystem = fileSystem
       $0.backendSpawning = spawning
       $0.socketAccepting = FakeSocketAccepting()
       $0.continuousClock = TestClock()
+      $0.signalHandling = FakeSignalHandling()
+      $0.processExiting = processExiting
     } operation: {
       try await application.run(
         workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend", "serve"],
@@ -173,6 +177,80 @@ import Testing
     await backend.finishIncoming()
     try await run
 
+    // Proves `.daemon`'s normal-shutdown path really reaches `DaemonTeardown`, not just that
+    // `DaemonTeardown` works in isolation (`DaemonTeardownTests` already covers that) - mirrors
+    // this suite's own "prove real wiring" philosophy. Two removals, not one: `Election` itself
+    // already removes any stale socket at the same path before binding (see `Election.swift`),
+    // and `DaemonTeardown` removes it again on the way out.
+    #expect(fileSystem.removedPaths.count == 2)
+    #expect(processExiting.exitCodes == [0])
+    #expect(!environment.calls.contains("signalOwnProcessGroup"))
+
+    io.closeTestEnds()
+  }
+
+  @Test func aSignalArrivingWhileDaemonEndsTeardownThroughTheGroupSignalPath() async throws {
+    let backend = FakeDuplexChannel(remainsOpenWhenExhausted: true)
+    let spawning = FakeBackendSpawning(results: [.success(backend)])
+    let io = PipeStandardIO()
+    let application = RealBSPMuxApplication()
+    let environment = FakeElectionEnvironment(
+      connectResults: [.absent],
+      lockResults: [.acquired(LockHandle(fileDescriptor: 999))]
+    )
+    let fileSystem = InMemoryFileSystem()
+    let processExiting = FakeProcessExiting()
+    let signalHandling = FakeSignalHandling()
+
+    async let run: Void = withDependencies {
+      $0.electionEnvironment = environment
+      $0.fileSystem = fileSystem
+      $0.backendSpawning = spawning
+      $0.socketAccepting = FakeSocketAccepting()
+      $0.continuousClock = TestClock()
+      $0.signalHandling = signalHandling
+      $0.processExiting = processExiting
+    } operation: {
+      try await application.run(
+        workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend", "serve"],
+        standardIn: io.standardIn, standardOut: io.standardOut
+      )
+    }
+
+    // Wait for the daemon's own signal registration to actually happen before firing - otherwise
+    // `fire` below could race `.daemon`'s own setup and find nothing registered yet.
+    await signalHandling.waitForRegistrations(count: 2)
+    #expect(signalHandling.registeredSignals.contains(SIGTERM))
+
+    // `fire` runs the registered handler synchronously, which spawns an unstructured `Task` to
+    // perform the actual (async) teardown - that `Task` captures whatever dependencies are
+    // ambient at the moment it's *created*, not at the moment the handler closure was originally
+    // written. Since `fire` is called from this test's own top-level scope (outside `run`'s own
+    // `withDependencies`), it needs its own matching scope here, or the spawned `Task` falls back
+    // to live (non-test) dependencies and traps - same "captured at creation time" reasoning
+    // `DaemonBootstrapTests`/`AcceptLoopTests` already rely on for their own detached loops.
+    withDependencies {
+      $0.electionEnvironment = environment
+      $0.fileSystem = fileSystem
+      $0.signalHandling = signalHandling
+      $0.processExiting = processExiting
+    } operation: {
+      signalHandling.fire(SIGTERM)
+    }
+
+    // `FakeProcessExiting` doesn't actually terminate the process, so the signal-triggered
+    // teardown `Task` and this test's own `run` both keep going - wait for the exit call to land
+    // rather than racing it.
+    await processExiting.waitForExit()
+
+    // Two removals, not one: `Election` itself already removed the (nonexistent) stale socket
+    // before binding (see `Election.swift`), and `DaemonTeardown`'s signal path removes it again.
+    #expect(fileSystem.removedPaths.count == 2)
+    #expect(environment.calls.contains("signalOwnProcessGroup"))
+    #expect(processExiting.exitCodes == [0])
+
+    await backend.finishIncoming()
+    try await run
     io.closeTestEnds()
   }
 }
