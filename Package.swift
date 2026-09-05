@@ -55,5 +55,13 @@ let package = Package(
       name: "BSPMuxIntegrationTests",
       dependencies: ["BSPMuxCore"]
     ),
+    .testTarget(
+      name: "FakeBSPBackendTests",
+      dependencies: [
+        "fake-bsp-backend",
+        .product(name: "BuildServerProtocol", package: "swift-tools-protocols"),
+        .product(name: "LanguageServerProtocolTransport", package: "swift-tools-protocols"),
+      ]
+    ),
   ]
 )
