@@ -53,7 +53,10 @@ let package = Package(
     ),
     .testTarget(
       name: "BSPMuxIntegrationTests",
-      dependencies: ["BSPMuxCore"]
+      dependencies: [
+        "BSPMuxCore",
+        .product(name: "Dependencies", package: "swift-dependencies"),
+      ]
     ),
     .testTarget(
       name: "FakeBSPBackendTests",
