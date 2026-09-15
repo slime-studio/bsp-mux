@@ -23,16 +23,6 @@ import Testing
     return try JSONRPCEnvelope(rawBytes: raw)
   }
 
-  /// Polls `condition` via `Task.yield()` instead of a fixed sleep, for synchronizing with
-  /// concurrently-running `async let` work whose progress isn't tied to a controllable clock -
-  /// mirrors `DaemonLifecycleTests`' own copy of this helper.
-  static func waitUntil(_ condition: @Sendable () async -> Bool, attempts: Int = 1000) async {
-    for _ in 0..<attempts {
-      if await condition() { return }
-      await Task.yield()
-    }
-  }
-
   @Test func requestGetsRewrittenIdAndResponseComesBackWithOriginalId() async throws {
     let backend = FakeDuplexChannel()
     let clientChannel = FakeDuplexChannel()
@@ -277,7 +267,7 @@ import Testing
       }
     }()
 
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
+    _ = await backend.waitForNextSentMessage()
     await daemon.handleBackendDisconnected()
     await initializeCall
 
