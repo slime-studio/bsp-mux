@@ -35,15 +35,6 @@ import Testing
     try JSONRPCEnvelope(rawBytes: Data(#"{"jsonrpc":"2.0","method":"build/exit"}"#.utf8))
   }
 
-  /// Polls `condition` via `Task.yield()` instead of a fixed sleep, for synchronizing with
-  /// concurrently-running `async let` work whose progress isn't tied to a controllable clock.
-  static func waitUntil(_ condition: @Sendable () async -> Bool, attempts: Int = 1000) async {
-    for _ in 0..<attempts {
-      if await condition() { return }
-      await Task.yield()
-    }
-  }
-
   // MARK: - build/initialize
 
   @Test func singleClientInitializeForwardsOnceAndCachesTheResponse() async throws {
@@ -56,11 +47,10 @@ import Testing
     // it has to run concurrently with observing/answering it - unlike a generic forwarded
     // request, which is fire-and-forget from handleClientMessage's point of view.
     async let call: Void = daemon.handleClientMessage(from: session, envelope: try Self.initializeRequest(id: #""abc""#))
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
+    let forwardedBytes = await backend.waitForNextSentMessage()
 
-    let forwarded = await backend.sentMessages
-    #expect(forwarded.count == 1)
-    let forwardedEnvelope = try JSONRPCEnvelope(rawBytes: forwarded[0])
+    #expect(await backend.sentMessages.count == 1)
+    let forwardedEnvelope = try JSONRPCEnvelope(rawBytes: forwardedBytes)
     #expect(forwardedEnvelope.id?.rawText != #""abc""#)  // rewritten to a daemon-minted id
 
     try await daemon.handleBackendMessage(envelope: Self.initializeResponse(id: forwardedEnvelope.id!.rawText))
@@ -82,13 +72,11 @@ import Testing
     // Both calls are made concurrently and don't return until the backend responds - the
     // whole point of this test is that A's call is still suspended when B's arrives.
     async let callA: Void = daemon.handleClientMessage(from: sessionA, envelope: try Self.initializeRequest(id: #""a""#))
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
+    let forwardedBytes = await backend.waitForNextSentMessage()
     async let callB: Void = daemon.handleClientMessage(from: sessionB, envelope: try Self.initializeRequest(id: #""b""#))
-    await Self.waitUntil { await backend.sentMessages.count >= 1 }
 
-    let forwarded = await backend.sentMessages
-    #expect(forwarded.count == 1)  // B never triggered a second real request
-    let backendID = try JSONRPCEnvelope(rawBytes: forwarded[0]).id!.rawText
+    #expect(await backend.sentMessages.count == 1)  // B never triggered a second real request
+    let backendID = try JSONRPCEnvelope(rawBytes: forwardedBytes).id!.rawText
 
     try await daemon.handleBackendMessage(envelope: Self.initializeResponse(id: backendID))
     _ = try await callA
@@ -112,12 +100,11 @@ import Testing
 
     async let callA: Void = daemon.handleClientMessage(
       from: sessionA, envelope: try Self.initializeRequest(id: "1", capabilities: #"{"languageIds":["swift"]}"#))
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
+    let forwardedBytes = await backend.waitForNextSentMessage()
     async let callB: Void = daemon.handleClientMessage(
       from: sessionB, envelope: try Self.initializeRequest(id: "2", capabilities: #"{"languageIds":["swift","c"]}"#))
-    await Self.waitUntil { await backend.sentMessages.count >= 1 }
 
-    let backendID = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0]).id!.rawText
+    let backendID = try JSONRPCEnvelope(rawBytes: forwardedBytes).id!.rawText
     try await daemon.handleBackendMessage(envelope: Self.initializeResponse(id: backendID))
     _ = try await callA
     _ = try await callB
@@ -142,12 +129,11 @@ import Testing
 
     async let callA: Void = daemon.handleClientMessage(
       from: sessionA, envelope: try Self.initializeRequest(id: "1", displayName: "EditorA", version: "1.0"))
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
+    let forwardedBytes = await backend.waitForNextSentMessage()
     async let callB: Void = daemon.handleClientMessage(
       from: sessionB, envelope: try Self.initializeRequest(id: "2", displayName: "EditorB", version: "9.9"))
-    await Self.waitUntil { await backend.sentMessages.count >= 1 }
 
-    let backendID = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0]).id!.rawText
+    let backendID = try JSONRPCEnvelope(rawBytes: forwardedBytes).id!.rawText
     try await daemon.handleBackendMessage(envelope: Self.initializeResponse(id: backendID))
     _ = try await callA
     _ = try await callB
@@ -165,8 +151,7 @@ import Testing
     let sessionLate = await daemon.registerSession(channel: channelLate)
 
     async let callA: Void = daemon.handleClientMessage(from: sessionA, envelope: try Self.initializeRequest(id: "1"))
-    await Self.waitUntil { await !backend.sentMessages.isEmpty }
-    let backendID = try JSONRPCEnvelope(rawBytes: await backend.sentMessages[0]).id!.rawText
+    let backendID = try JSONRPCEnvelope(rawBytes: await backend.waitForNextSentMessage()).id!.rawText
     try await daemon.handleBackendMessage(envelope: Self.initializeResponse(id: backendID))
     _ = try await callA
 
