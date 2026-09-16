@@ -8,6 +8,7 @@ import Foundation
 enum BinaryLocator {
   static let bspMux = productsDirectory.appending(path: "bsp-mux")
   static let fakeBSPBackend = productsDirectory.appending(path: "fake-bsp-backend")
+  static let rawBytesBSPBackend = productsDirectory.appending(path: "raw-bytes-bsp-backend")
 
   /// `#filePath` is this source file's own absolute path at compile time - walking up from
   /// `Tests/BSPMuxIntegrationTests/Support/BinaryLocator.swift` to the repo root is a fixed,
