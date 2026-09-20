@@ -12,12 +12,11 @@ import Glibc
 /// Real-subprocess integration tests - `BSPMuxCoreTests` already covers all of this logic against
 /// fakes; this suite exists specifically for the guarantees that only mean anything across real
 /// OS processes (`Election`'s `flock`/`connect` race, a second `bsp-mux run` really becoming a
-/// relay, closing one client's real stdin only affecting that one process). Covers six of
-/// DESIGN.md's eight integration scenarios - `originId`-routed and broadcast notifications need
-/// the backend to spontaneously emit a notification carrying a raw `originId` field, which
-/// `fake-bsp-backend`'s typed `BuildServerProtocol` decode/encode has no way to represent (see
-/// this suite's own memory/PR description for the full reasoning) - that needs a separate
-/// raw-bytes backend stub, follow-on work, not started here.
+/// relay, closing one client's real stdin only affecting that one process). Covers all eight of
+/// DESIGN.md's integration scenarios - the last two (`originId`-routed and broadcast
+/// notifications) drive `raw-bytes-bsp-backend` rather than `fake-bsp-backend`, since they need
+/// the backend to spontaneously emit a notification carrying a raw `originId` field (or not),
+/// which `fake-bsp-backend`'s typed `BuildServerProtocol` decode/encode has no way to represent.
 ///
 /// `.serialized`: every scenario below counts real backend processes system-wide via
 /// `BackendProcesses.pids()`, which would see another concurrently-running scenario's own
@@ -231,5 +230,84 @@ import Glibc
     for client in clients { client.forceKillIfRunning() }
 
     #expect(maxObservedCount <= 1)
+  }
+
+  // MARK: - originId-routed / broadcast notifications (raw-bytes-bsp-backend)
+
+  /// Assertions below are deliberately content-based, not position-based:
+  /// `Daemon.routeBackendNotification` iterates a `Dictionary` (unspecified order) and a
+  /// session's own reply arrives via a fully separate code path from a routed/broadcast
+  /// notification, so nothing guarantees which of the two a client observes first.
+  @Test func originIdRoutedNotificationReachesOnlyTheRequestingClient() async throws {
+    let workspace = try Self.makeWorkspace()
+    defer { try? FileManager.default.removeItem(atPath: workspace) }
+    let backendArgv = [BinaryLocator.rawBytesBSPBackend.path]
+
+    let clientA = try SimulatedClient.launch(workspaceRoot: workspace, backendArgv: backendArgv)
+    let clientB = try SimulatedClient.launch(workspaceRoot: workspace, backendArgv: backendArgv)
+    defer {
+      clientA.forceKillIfRunning()
+      clientB.forceKillIfRunning()
+    }
+    try await clientA.send(Self.initializeRequest(id: "a"))
+    _ = try #require(try await clientA.receive())
+    try await clientB.send(Self.initializeRequest(id: "b"))
+    _ = try #require(try await clientB.receive())
+
+    let triggerJSON =
+      #"{"jsonrpc":"2.0","id":"2","method":"test/emitNotification","params":{"originId":"task-1","#
+      + #""notificationMethod":"build/taskStart","notificationParams":{"originId":"task-1"}}}"#
+    let trigger = Data(triggerJSON.utf8)
+    try await clientA.send(trigger)
+
+    var sawNotification = false
+    var sawReply = false
+    for _ in 0..<2 {
+      let object = try Self.jsonObject(try #require(try await clientA.receive()))
+      if object["method"] as? String == "build/taskStart" { sawNotification = true }
+      if object["id"] as? String == "2" { sawReply = true }
+    }
+    #expect(sawNotification)
+    #expect(sawReply)
+
+    await #expect(throws: TimeoutError.self) {
+      _ = try await clientB.receive(timeoutSeconds: 1)
+    }
+  }
+
+  @Test func notificationWithoutOriginIdBroadcastsToAllConnectedClients() async throws {
+    let workspace = try Self.makeWorkspace()
+    defer { try? FileManager.default.removeItem(atPath: workspace) }
+    let backendArgv = [BinaryLocator.rawBytesBSPBackend.path]
+
+    let clientA = try SimulatedClient.launch(workspaceRoot: workspace, backendArgv: backendArgv)
+    let clientB = try SimulatedClient.launch(workspaceRoot: workspace, backendArgv: backendArgv)
+    defer {
+      clientA.forceKillIfRunning()
+      clientB.forceKillIfRunning()
+    }
+    try await clientA.send(Self.initializeRequest(id: "a"))
+    _ = try #require(try await clientA.receive())
+    try await clientB.send(Self.initializeRequest(id: "b"))
+    _ = try #require(try await clientB.receive())
+
+    let triggerJSON =
+      #"{"jsonrpc":"2.0","id":"2","method":"test/emitNotification","params":{"notificationMethod":"buildTarget/didChange","#
+      + #""notificationParams":{}}}"#
+    let trigger = Data(triggerJSON.utf8)
+    try await clientA.send(trigger)
+
+    var sawNotification = false
+    var sawReply = false
+    for _ in 0..<2 {
+      let object = try Self.jsonObject(try #require(try await clientA.receive()))
+      if object["method"] as? String == "buildTarget/didChange" { sawNotification = true }
+      if object["id"] as? String == "2" { sawReply = true }
+    }
+    #expect(sawNotification)
+    #expect(sawReply)
+
+    let bMessage = try Self.jsonObject(try #require(try await clientB.receive()))
+    #expect(bMessage["method"] as? String == "buildTarget/didChange")
   }
 }

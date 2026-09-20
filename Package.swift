@@ -9,6 +9,7 @@ let package = Package(
   products: [
     .executable(name: "bsp-mux", targets: ["bsp-mux"]),
     .executable(name: "fake-bsp-backend", targets: ["fake-bsp-backend"]),
+    .executable(name: "raw-bytes-bsp-backend", targets: ["raw-bytes-bsp-backend"]),
   ],
   dependencies: [
     .package(url: "https://github.com/swiftlang/swift-tools-protocols.git", exact: "0.0.10"),
@@ -43,6 +44,10 @@ let package = Package(
         .product(name: "LanguageServerProtocolTransport", package: "swift-tools-protocols"),
       ]
     ),
+    .executableTarget(
+      name: "raw-bytes-bsp-backend",
+      dependencies: ["BSPMuxCore"]
+    ),
     .testTarget(
       name: "BSPMuxCoreTests",
       dependencies: [
@@ -65,6 +70,10 @@ let package = Package(
         .product(name: "BuildServerProtocol", package: "swift-tools-protocols"),
         .product(name: "LanguageServerProtocolTransport", package: "swift-tools-protocols"),
       ]
+    ),
+    .testTarget(
+      name: "RawBytesBSPBackendTests",
+      dependencies: ["raw-bytes-bsp-backend"]
     ),
   ]
 )
