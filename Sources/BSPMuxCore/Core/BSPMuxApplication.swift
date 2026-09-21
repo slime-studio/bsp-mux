@@ -24,6 +24,10 @@ public protocol BSPMuxApplication: Sendable {
   /// existing convention that fd 0/1 wiring belongs to whoever constructs a real process, not to
   /// the type doing the work.
   func run(workspaceRoot: String, backendArgv: [String], standardIn: any ByteSource, standardOut: any ByteSink) async throws
+
+  /// Finds the running daemon for this workspace (if any) and asks it to shut down - see
+  /// `DaemonStopSignal` for the actual logic.
+  func stop(workspaceRoot: String, multiplexerExecutable: String, force: Bool) async throws -> StopResult
 }
 
 /// The one production implementation of `BSPMuxApplication`: orchestrates `Installer`,
@@ -75,7 +79,18 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
       }
 
       await daemon.waitForShutdown()
-      await DaemonTeardown.run(reason: .normal, socketPath: paths.socketPath)
+      let reason: ShutdownReason
+      switch await daemon.forcedShutdown {
+      case .none:
+        reason = .normal
+      case .requested(let hardKill):
+        reason = .signal(hardKill ? SIGKILL : SIGTERM)
+      }
+      await DaemonTeardown.run(reason: reason, socketPath: paths.socketPath)
     }
+  }
+
+  public func stop(workspaceRoot: String, multiplexerExecutable: String, force: Bool) async throws -> StopResult {
+    try await DaemonStopSignal().stop(workspaceRoot: workspaceRoot, multiplexerExecutable: multiplexerExecutable, force: force)
   }
 }

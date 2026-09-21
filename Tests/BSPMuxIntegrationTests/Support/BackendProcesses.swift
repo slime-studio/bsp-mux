@@ -1,15 +1,16 @@
 import Foundation
 
-/// Finds real `fake-bsp-backend` processes system-wide via `pgrep -f`, anchored to match only a
-/// command line that's *exactly* the backend's own path - confirmed empirically that this still
-/// returns exactly one line with two `bsp-mux` processes alive at once (a winner and a relay,
-/// both with the backend path somewhere in their own argv), since neither's full command line
-/// equals the anchored pattern.
+/// Finds real backend processes system-wide via `pgrep -f`, anchored to match only a command
+/// line that's *exactly* the backend's own path - confirmed empirically that this still returns
+/// exactly one line with two `bsp-mux` processes alive at once (a winner and a relay, both with
+/// the backend path somewhere in their own argv), since neither's full command line equals the
+/// anchored pattern. Defaults to `fake-bsp-backend`, this suite's usual backend; pass
+/// `executablePath:` for scenarios driving a different one (e.g. `raw-bytes-bsp-backend`).
 enum BackendProcesses {
-  static func pids() -> [Int32] {
+  static func pids(executablePath: String = BinaryLocator.fakeBSPBackend.path) -> [Int32] {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-    process.arguments = ["-f", "^\(BinaryLocator.fakeBSPBackend.path)$"]
+    process.arguments = ["-f", "^\(executablePath)$"]
     let pipe = Pipe()
     process.standardOutput = pipe
     do {

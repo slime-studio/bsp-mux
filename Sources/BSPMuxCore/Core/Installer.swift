@@ -78,8 +78,10 @@ public struct Installer {
   }
 
   /// Given an already-wrapped argv (`[self, "--workspace-root", root, "--", ...backend]`),
-  /// returns just the backend's original argv.
-  static func backendArgv(unwrapping wrappedArgv: [String]) -> [String] {
+  /// returns just the backend's original argv. `public`, not just `internal`: `DaemonStopSignal`
+  /// also needs this exact unwrap to recover a workspace's real backend argv from its already-
+  /// wrapped `buildServer.json`, and reuses this rather than duplicating the logic.
+  public static func backendArgv(unwrapping wrappedArgv: [String]) -> [String] {
     guard let separatorIndex = wrappedArgv.firstIndex(of: "--") else {
       // Shouldn't happen for anything we wrapped ourselves, but don't crash on a
       // hand-edited file — treat the whole thing (minus argv[0]) as the backend argv.
