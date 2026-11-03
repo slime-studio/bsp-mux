@@ -143,6 +143,25 @@ no-op unless `--force` is passed, in which case the existing wrapped argv
 is unwrapped (split at `--`) and rewrapped, so repeated `--force` runs
 never nest wrappers.
 
+`sourcekit-lsp` doesn't only look for `buildServer.json` — per the [BSP
+spec's discovery mechanism](https://build-server-protocol.github.io/docs/overview/server-discovery),
+the standard location is `<workspace>/.bsp/*.json`, and `buildServer.json`
+is explicitly a pre-6.1 compatibility fallback that's only consulted if no
+matching `.bsp/*.json` exists (confirmed against `sourcekit-lsp`'s
+`ExternalBuildServerAdapter.getConfigPath`). Today's motivating backend,
+`sourcekit-xcode-bsp`, only ever writes `buildServer.json` (its `init`
+command), so this doesn't affect the project's actual current use case —
+but if a workspace ever grows a `.bsp/*.json` with an overlapping language
+(another backend, a future `sourcekit-xcode-bsp` version, a monorepo with
+two BSP tools), `sourcekit-lsp` would silently prefer that file and never
+look at `buildServer.json` at all, making an `install` into `buildServer.json`
+silently ineffective. Rather than widening `install` to also handle `.bsp`
+(out of scope — not the discovery mechanism anything here actually uses),
+`install` checks for a competing `.bsp/*.json` whose `languages` overlaps
+sourcekit-lsp's relevant set (`swift`, `c`, `cpp`, `objective-c`,
+`objective-cpp`) and fails loudly before touching `buildServer.json` if one
+exists, rather than wrapping a file that would never be read.
+
 ### Project key
 
 SHA256 over:

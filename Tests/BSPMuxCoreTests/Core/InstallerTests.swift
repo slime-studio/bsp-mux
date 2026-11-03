@@ -159,6 +159,45 @@ import Testing
     }
   }
 
+  @Test func installThrowsWhenCompetingBSPDirConfigExists() throws {
+    let fs = InMemoryFileSystem()
+    try Self.writeSample(to: fs)
+    try fs.write(
+      try JSONSerialization.data(withJSONObject: ["name": "sourcekit-xcode-bsp", "languages": ["swift"], "argv": ["x"]]),
+      toPath: "\(Self.workspaceRoot)/.bsp/sourcekit-xcode-bsp.json"
+    )
+
+    withDependencies {
+      $0.fileSystem = fs
+    } operation: {
+      let installer = Installer()
+      #expect(throws: Installer.Error.self) {
+        try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
+      }
+    }
+
+    // buildServer.json must be left untouched - install bailed before touching anything.
+    let json = try Self.readJSON(fs)
+    #expect(json["argv"] as? [String] == ["/usr/local/bin/sourcekit-xcode-bsp", "serve"])
+  }
+
+  @Test func installIgnoresBSPDirConfigWithUnrelatedLanguage() throws {
+    let fs = InMemoryFileSystem()
+    try Self.writeSample(to: fs)
+    try fs.write(
+      try JSONSerialization.data(withJSONObject: ["name": "bazel-bsp", "languages": ["scala"], "argv": ["x"]]),
+      toPath: "\(Self.workspaceRoot)/.bsp/bazel-bsp.json"
+    )
+
+    try withDependencies {
+      $0.fileSystem = fs
+    } operation: {
+      let installer = Installer()
+      let result = try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
+      #expect(result.changed)
+    }
+  }
+
   @Test func backendArgvUnwrapsPastSeparator() {
     let wrapped = ["/path/to/bsp-mux", "--workspace-root", "/root", "--", "backend", "serve", "--flag"]
     #expect(Installer.backendArgv(unwrapping: wrapped) == ["backend", "serve", "--flag"])

@@ -38,6 +38,18 @@ final class InMemoryFileSystem: FileSystemProviding, @unchecked Sendable {
     resolvedPaths[path] ?? path
   }
 
+  /// Derives directory listings from `files`' keys rather than tracking directories
+  /// separately — fine since tests only ever write full file paths, never empty dirs.
+  func contentsOfDirectory(atPath path: String) -> [String] {
+    let prefix = path.hasSuffix("/") ? path : path + "/"
+    return files.keys.compactMap { key in
+      guard key.hasPrefix(prefix) else { return nil }
+      let remainder = key.dropFirst(prefix.count)
+      guard !remainder.isEmpty, !remainder.contains("/") else { return nil }
+      return String(remainder)
+    }
+  }
+
   subscript(path: String) -> Data? {
     files[path]
   }

@@ -20,6 +20,13 @@ public struct Installer {
 
   public init() {}
 
+  /// Languages sourcekit-lsp treats as relevant when scanning `.bsp/*.json` for a connection
+  /// file to use (`ExternalBuildServerAdapter.getConfigPath` in swiftlang/sourcekit-lsp),
+  /// matching the rawValues `swift-tools-protocols`' `Language` type defines for them.
+  private static let sourceKitRelevantLanguages: Set<String> = [
+    "swift", "c", "cpp", "objective-c", "objective-cpp",
+  ]
+
   /// - Parameters:
   ///   - workspaceRoot: Absolute path to the directory containing `buildServer.json`.
   ///   - multiplexerExecutable: Path to our own binary, to be spliced in as `argv[0]`.
@@ -32,6 +39,17 @@ public struct Installer {
     multiplexerExecutable: String,
     force: Bool = false
   ) throws -> InstallResult {
+    if let competingPath = competingBSPDirConfigPath(workspaceRoot: workspaceRoot) {
+      throw Error(
+        description:
+          "Found \(competingPath), a standard BSP connection file (see "
+          + "build-server-protocol.github.io/docs/overview/server-discovery). sourcekit-lsp "
+          + "prefers any matching .bsp/*.json over buildServer.json — the one 'buildServer.json' "
+          + "is only a pre-6.1 compatibility fallback — so wrapping buildServer.json here would "
+          + "have no effect. Remove or update the .bsp config instead."
+      )
+    }
+
     let buildServerJSONPath = "\(workspaceRoot)/buildServer.json"
     guard fileSystem.fileExists(atPath: buildServerJSONPath) else {
       throw Error(
@@ -88,6 +106,26 @@ public struct Installer {
       return Array(wrappedArgv.dropFirst())
     }
     return Array(wrappedArgv[(separatorIndex + 1)...])
+  }
+
+  /// sourcekit-lsp scans `<workspaceRoot>/.bsp/*.json` for a file whose `languages` overlaps
+  /// the ones it cares about, sorted lexicographically, first match wins — and prefers whatever
+  /// it finds there over `buildServer.json` unconditionally. Returns that file's path if one
+  /// exists, so `install` can fail loudly instead of silently wrapping a file sourcekit-lsp will
+  /// never read.
+  private func competingBSPDirConfigPath(workspaceRoot: String) -> String? {
+    let bspDir = "\(workspaceRoot)/.bsp"
+    for entry in fileSystem.contentsOfDirectory(atPath: bspDir).sorted() where entry.hasSuffix(".json") {
+      let path = "\(bspDir)/\(entry)"
+      guard let data = try? fileSystem.contents(atPath: path),
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let languages = json["languages"] as? [String]
+      else { continue }
+      if !Set(languages).isDisjoint(with: Self.sourceKitRelevantLanguages) {
+        return path
+      }
+    }
+    return nil
   }
 
   private func writeWrapped(
