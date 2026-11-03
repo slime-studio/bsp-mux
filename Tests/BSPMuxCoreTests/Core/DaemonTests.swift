@@ -248,6 +248,57 @@ import Testing
     #expect(replyBString?.contains(#""error""#) == true)
   }
 
+  @Test func requestForcedShutdownFailsInFlightRequestsAndRecordsWhetherHardKillWasWanted() async throws {
+    let backend = FakeDuplexChannel()
+    let clientChannel = FakeDuplexChannel()
+    let daemon = Daemon(backend: backend)
+    let session = await daemon.registerSession(channel: clientChannel)
+
+    try await daemon.handleClientMessage(from: session, envelope: Self.request(id: #""abc""#, method: "buildTarget/sources"))
+    #expect(await backend.sentMessages.count == 1)
+
+    #expect(await daemon.forcedShutdown == .none)
+    async let shutdown: Void = daemon.waitForShutdown()
+    await daemon.requestForcedShutdown(hardKill: true)
+    await shutdown
+
+    #expect(await daemon.forcedShutdown == .requested(hardKill: true))
+    let toClient = await clientChannel.sentMessages
+    #expect(toClient.count == 1)
+    let replyString = try String(bytes: JSONRPCEnvelope(rawBytes: toClient[0]).rawBytes, encoding: .utf8)
+    #expect(replyString?.contains(#""error""#) == true)
+  }
+
+  @Test func bspMuxStopMessageDispatchesToRequestForcedShutdownWithTheRequestedForceFlag() async throws {
+    let backend = FakeDuplexChannel()
+    let clientChannel = FakeDuplexChannel()
+    let daemon = Daemon(backend: backend)
+    let session = await daemon.registerSession(channel: clientChannel)
+
+    let stopMessage = try JSONRPCEnvelope(
+      rawBytes: Data(#"{"jsonrpc":"2.0","method":"bspMux/stop","params":{"force":true}}"#.utf8))
+    async let shutdown: Void = daemon.waitForShutdown()
+    try await daemon.handleClientMessage(from: session, envelope: stopMessage)
+    await shutdown
+
+    #expect(await daemon.forcedShutdown == .requested(hardKill: true))
+  }
+
+  @Test func bspMuxStopMessageWithoutForceRequestsAGracefulSignal() async throws {
+    let backend = FakeDuplexChannel()
+    let clientChannel = FakeDuplexChannel()
+    let daemon = Daemon(backend: backend)
+    let session = await daemon.registerSession(channel: clientChannel)
+
+    let stopMessage = try JSONRPCEnvelope(
+      rawBytes: Data(#"{"jsonrpc":"2.0","method":"bspMux/stop","params":{"force":false}}"#.utf8))
+    async let shutdown: Void = daemon.waitForShutdown()
+    try await daemon.handleClientMessage(from: session, envelope: stopMessage)
+    await shutdown
+
+    #expect(await daemon.forcedShutdown == .requested(hardKill: false))
+  }
+
   @Test func backendDisconnectedFailsAnInFlightInitializeRoundTrip() async throws {
     let backend = FakeDuplexChannel()
     let clientChannel = FakeDuplexChannel()

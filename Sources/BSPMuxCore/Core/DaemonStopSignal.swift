@@ -1,0 +1,94 @@
+import Dependencies
+import Foundation
+
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// Finds the running daemon for a workspace (if any) and asks it to shut down - the logic
+/// behind `bsp-mux stop`. Connects to the daemon's own socket exactly like a relay would
+/// (`ElectionEnvironment.connect`, already the correct "is anyone listening" check - `nil`
+/// already means "no daemon" whether the socket path is absent or stale) and sends it one
+/// framed `bspMux/stop` notification, rather than tracking a PID anywhere - see this feature's
+/// own design notes for why (a PID file was considered and rejected: it would add a new
+/// per-daemon file and the usual PID-reuse caveat, for no benefit over the socket this project
+/// already has for everything else).
+public struct DaemonStopSignal {
+  public struct Error: Swift.Error, CustomStringConvertible {
+    public let description: String
+  }
+
+  @Dependency(\.fileSystem) private var fileSystem
+  @Dependency(\.electionEnvironment) private var environment
+  @Dependency(\.continuousClock) private var clock
+
+  public init() {}
+
+  /// - Parameters:
+  ///   - multiplexerExecutable: This binary's own path, to confirm `buildServer.json` was
+  ///     actually wrapped by *us* before trusting its `argv` to recover the real backend's -
+  ///     the same check `Installer.install`'s own `alreadyWrapped` already makes.
+  ///   - force: Use `SIGKILL` rather than `SIGTERM` for the backend's process-group signal, in
+  ///     case it's ignoring `SIGTERM`. Both are fully cooperative paths - the daemon must still
+  ///     be alive and processing messages to honor either (see this type's own design notes for
+  ///     why a genuinely deadlocked daemon is a known, accepted gap here).
+  public func stop(workspaceRoot: String, multiplexerExecutable: String, force: Bool) async throws -> StopResult {
+    let buildServerJSONPath = "\(workspaceRoot)/buildServer.json"
+    guard fileSystem.fileExists(atPath: buildServerJSONPath) else {
+      throw Error(description: "No buildServer.json found at \(buildServerJSONPath) - nothing to stop.")
+    }
+
+    let data = try fileSystem.contents(atPath: buildServerJSONPath)
+    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw Error(description: "\(buildServerJSONPath) does not contain a JSON object")
+    }
+    guard let wrappedArgv = json["argv"] as? [String], !wrappedArgv.isEmpty else {
+      throw Error(description: "\(buildServerJSONPath) has no non-empty 'argv' array")
+    }
+    let resolvedMultiplexerPath = fileSystem.resolvePath(multiplexerExecutable)
+    guard wrappedArgv.first.map({ fileSystem.resolvePath($0) }) == resolvedMultiplexerPath else {
+      throw Error(
+        description: "\(buildServerJSONPath) isn't wrapped by bsp-mux - run `bsp-mux install` first."
+      )
+    }
+
+    let backendArgv = Installer.backendArgv(unwrapping: wrappedArgv)
+    let key = ProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
+    let paths = ProjectPaths(key: key)
+
+    guard let connection = try environment.connect(to: paths.socketPath) else {
+      return StopResult(outcome: .notRunning)
+    }
+    let stream = RealDuplexByteStream(fileDescriptor: connection.fileDescriptor)
+    let channel = FramedDuplexChannel(source: stream, sink: stream)
+    let message = #"{"jsonrpc":"2.0","method":"bspMux/stop","params":{"force":\#(force)}}"#
+    try await channel.send(Data(message.utf8))
+    close(connection.fileDescriptor)
+
+    // Confirm the daemon actually unlinked the socket and exited, rather than just hoping the
+    // message got through - bounded so a daemon that never responds (the accepted "genuinely
+    // deadlocked" gap) fails loudly instead of this hanging forever.
+    for _ in 0..<60 {
+      guard let stillListening = try environment.connect(to: paths.socketPath) else {
+        return StopResult(outcome: .stopped)
+      }
+      close(stillListening.fileDescriptor)
+      try await clock.sleep(for: .milliseconds(50))
+    }
+    throw Error(
+      description:
+        "Sent the stop request, but the daemon at \(paths.socketPath) didn't respond within 3s - "
+        + "it may be stuck. You may need to find and stop its process manually."
+    )
+  }
+}
+
+public struct StopResult: Equatable {
+  public enum Outcome: Equatable {
+    case stopped
+    case notRunning
+  }
+  public let outcome: Outcome
+}

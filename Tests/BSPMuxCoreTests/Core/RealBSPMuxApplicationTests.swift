@@ -50,6 +50,31 @@ import Testing
     }
   }
 
+  // MARK: - stop
+
+  /// Proves `RealBSPMuxApplication.stop` really delegates to `DaemonStopSignal` (which has its
+  /// own dedicated, thorough test suite) rather than just asserting `DaemonStopSignal` works in
+  /// isolation again - mirrors this file's own "prove real wiring" philosophy already used for
+  /// `install`/`run`.
+  @Test func stopDelegatesToDaemonStopSignal() async throws {
+    let fs = InMemoryFileSystem()
+    try fs.write(
+      try JSONSerialization.data(withJSONObject: [
+        "argv": ["/bin/bsp-mux", "--workspace-root", "/workspace", "--", "/usr/bin/backend"]
+      ]), toPath: "/workspace/buildServer.json")
+    let environment = FakeElectionEnvironment(connectResults: [.absent])
+
+    let result = try await withDependencies {
+      $0.fileSystem = fs
+      $0.electionEnvironment = environment
+    } operation: {
+      try await RealBSPMuxApplication().stop(workspaceRoot: "/workspace", multiplexerExecutable: "/bin/bsp-mux", force: false)
+    }
+
+    #expect(result.outcome == .notRunning)
+    #expect(environment.calls == ["connect"])
+  }
+
   // MARK: - run: .relay
 
   /// Mirrors `RealDuplexByteStreamTests`/`RelaySessionTests`' own helper: a real, connected

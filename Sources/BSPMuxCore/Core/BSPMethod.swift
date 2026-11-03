@@ -8,4 +8,8 @@ extension String {
   static let buildExit = "build/exit"
   static let buildLogMessage = "build/logMessage"
   static let originId = "originId"
+  /// Not a real BSP method - `bsp-mux stop`'s own control message, namespaced under `bspMux/`
+  /// (rather than a real backend's own vendor namespace, e.g. `sourcekit-xcode-bsp/...`) so it
+  /// can never collide with anything a real backend defines.
+  static let bspMuxStop = "bspMux/stop"
 }

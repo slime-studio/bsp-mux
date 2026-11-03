@@ -11,6 +11,9 @@ public enum CLICommand: Sendable, Equatable {
   /// launches from then on: either become the daemon or relay to one, for this workspace root
   /// and backend.
   case run(workspaceRoot: String, backendArgv: [String])
+  /// `bsp-mux stop --workspace-root <path> [--force]` - finds the running daemon for this
+  /// workspace (if any) and asks it to shut down.
+  case stop(workspaceRoot: String, force: Bool)
 }
 
 /// Parses `bsp-mux`'s own argv into a `CLICommand`, via `ArgumentParser`.
@@ -32,6 +35,8 @@ public enum CLIArguments {
       return .install(workspaceRoot: install.workspaceRoot, force: install.force)
     case let run as RunArguments:
       return .run(workspaceRoot: run.workspaceRoot, backendArgv: run.backendArgv)
+    case let stop as StopArguments:
+      return .stop(workspaceRoot: stop.workspaceRoot, force: stop.force)
     default:
       // Neither of ours - some other built-in ArgumentParser behavior took over instead (a
       // --help/-h request, most likely, but not provably only that - ArgumentParser also
@@ -58,7 +63,7 @@ public enum CLIArguments {
 struct RootArguments: ParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "bsp-mux",
-    subcommands: [InstallArguments.self, RunArguments.self],
+    subcommands: [InstallArguments.self, RunArguments.self, StopArguments.self],
     defaultSubcommand: RunArguments.self
   )
 }
@@ -70,6 +75,16 @@ struct InstallArguments: ParsableCommand {
   var workspaceRoot: String
 
   @Flag(name: .customLong("force"), help: "Re-wrap an already-wrapped buildServer.json instead of leaving it untouched.")
+  var force = false
+}
+
+struct StopArguments: ParsableCommand {
+  static let configuration = CommandConfiguration(commandName: "stop")
+
+  @Option(name: .customLong("workspace-root"), help: "Absolute path to the project's workspace root.")
+  var workspaceRoot: String
+
+  @Flag(name: .customLong("force"), help: "Use SIGKILL rather than SIGTERM for the backend's process group.")
   var force = false
 }
 

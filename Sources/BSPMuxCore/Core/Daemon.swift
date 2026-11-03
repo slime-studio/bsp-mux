@@ -43,6 +43,20 @@ public actor Daemon {
   private var hasShutDown = false
   private var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
 
+  /// Whether an external `bsp-mux stop` request (see `handleClientMessage`'s `.bspMuxStop` case)
+  /// is why this daemon is shutting down, and if so whether it asked for a hard kill - read by
+  /// `RealBSPMuxApplication.run()` after `waitForShutdown()` resolves to decide between
+  /// `DaemonTeardown`'s `.normal` and `.signal` reasons. An ordinary idle-timeout/backend-
+  /// disconnect shutdown leaves this `.none`, since those paths already best-effort attempted a
+  /// graceful backend shutdown (or the backend is already gone) - only an administrative stop
+  /// needs the backend's process group force-signaled.
+  public enum ForcedShutdownRequest: Sendable, Equatable {
+    case none
+    case requested(hardKill: Bool)
+  }
+  private var forcedShutdownRequest: ForcedShutdownRequest = .none
+  public var forcedShutdown: ForcedShutdownRequest { forcedShutdownRequest }
+
   public init(backend: any DuplexChannel, idleGracePeriod: Duration = .seconds(5)) {
     self.backend = backend
     self.idleGracePeriod = idleGracePeriod
@@ -104,9 +118,23 @@ public actor Daemon {
       try await session.send(BSPMessages.successResponse(id: id))
     case .buildExit:
       deregisterSession(sessionID)
+    case .bspMuxStop:
+      await requestForcedShutdown(hardKill: envelope.paramsField("force") == "true")
     default:
       try await forwardToBackend(envelope, from: sessionID)
     }
+  }
+
+  /// An external `bsp-mux stop` request arrived over the wire (the `.bspMuxStop` case above) -
+  /// same effect on every connected session as the backend itself disconnecting (their in-flight
+  /// requests fail, the daemon winds down), reusing `handleBackendDisconnected()`'s already-
+  /// tested logic for exactly that reason. The one thing that reuse doesn't capture on its own:
+  /// the caller needs to know this shutdown, unlike an ordinary idle-timeout/backend-disconnect,
+  /// should force-kill the backend process rather than trusting it already exited or was already
+  /// asked nicely - `forcedShutdown` is that signal.
+  public func requestForcedShutdown(hardKill: Bool) async {
+    forcedShutdownRequest = .requested(hardKill: hardKill)
+    await handleBackendDisconnected()
   }
 
   private func handleInitialize(_ envelope: JSONRPCEnvelope, originalID: JSONRPCRawID) async throws -> Data {

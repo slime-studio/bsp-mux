@@ -57,6 +57,19 @@ do {
       standardIn: RealByteSource(fileDescriptor: STDIN_FILENO),
       standardOut: RealByteSink(fileDescriptor: STDOUT_FILENO)
     )
+
+  case .stop(let workspaceRoot, let force):
+    let result = try await application.stop(
+      workspaceRoot: workspaceRoot,
+      multiplexerExecutable: currentExecutablePath(),
+      force: force
+    )
+    switch result.outcome {
+    case .stopped:
+      print("Stopped the bsp-mux daemon for \(workspaceRoot).")
+    case .notRunning:
+      print("No running bsp-mux daemon found for \(workspaceRoot).")
+    }
   }
 } catch {
   CLIArguments.exit(withError: error)

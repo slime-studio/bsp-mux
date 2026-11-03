@@ -310,4 +310,52 @@ import Glibc
     let bMessage = try Self.jsonObject(try #require(try await clientB.receive()))
     #expect(bMessage["method"] as? String == "buildTarget/didChange")
   }
+
+  // MARK: - bsp-mux stop
+
+  @Test func stopFindsARealDaemonAndTerminatesItAndItsBackend() async throws {
+    let workspace = try Self.makeWorkspace()
+    defer { try? FileManager.default.removeItem(atPath: workspace) }
+    let backendArgv = [BinaryLocator.rawBytesBSPBackend.path]
+
+    // A real, unwrapped buildServer.json - install (not SimulatedClient, which bypasses this
+    // file entirely) is what stop's own backendArgv recovery actually depends on.
+    let unwrapped: [String: Any] = [
+      "name": "raw-bytes-bsp-backend", "version": "0.1.0", "bspVersion": "2.1.0",
+      "languages": ["swift"], "argv": backendArgv,
+    ]
+    try JSONSerialization.data(withJSONObject: unwrapped)
+      .write(to: URL(fileURLWithPath: "\(workspace)/buildServer.json"))
+
+    let installResult = try BSPMuxCLI.run(["install", "--workspace-root", workspace])
+    #expect(installResult.exitCode == 0)
+
+    let client = try SimulatedClient.launch(workspaceRoot: workspace, backendArgv: backendArgv)
+    defer { client.forceKillIfRunning() }
+    try await client.send(Self.initializeRequest(id: "1"))
+    _ = try #require(try await client.receive())
+    #expect(BackendProcesses.pids(executablePath: BinaryLocator.rawBytesBSPBackend.path).count == 1)
+
+    let stopResult = try BSPMuxCLI.run(["stop", "--workspace-root", workspace])
+    #expect(stopResult.exitCode == 0)
+    #expect(stopResult.standardOutput.contains("Stopped"))
+
+    #expect(client.waitForExit(timeoutSeconds: 10) != nil)
+    #expect(BackendProcesses.pids(executablePath: BinaryLocator.rawBytesBSPBackend.path).isEmpty)
+  }
+
+  @Test func stopReportsNoRunningDaemonWhenNoneIsListening() async throws {
+    let workspace = try Self.makeWorkspace()
+    defer { try? FileManager.default.removeItem(atPath: workspace) }
+    let backendArgv = [BinaryLocator.rawBytesBSPBackend.path]
+
+    let unwrapped: [String: Any] = ["argv": backendArgv]
+    try JSONSerialization.data(withJSONObject: unwrapped)
+      .write(to: URL(fileURLWithPath: "\(workspace)/buildServer.json"))
+    #expect(try BSPMuxCLI.run(["install", "--workspace-root", workspace]).exitCode == 0)
+
+    let stopResult = try BSPMuxCLI.run(["stop", "--workspace-root", workspace])
+    #expect(stopResult.exitCode == 0)
+    #expect(stopResult.standardOutput.contains("No running"))
+  }
 }
