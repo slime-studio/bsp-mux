@@ -180,9 +180,16 @@ under `/tmp` (`/tmp/bsp-mux-<uid>/`), not under `$TMPDIR` — on Darwin that's
 a long per-session path (`/var/folders/.../T/...`) that would consume most
 of the `sockaddr_un` budget (~104 bytes total) on its own. Filenames are
 the first 16 hex chars of the SHA256 (64 bits) to stay well within that
-budget regardless of how long the actual workspace path is; the full hash
-is recorded in a sidecar `<hash16>.meta.json` so a connecting client can
-detect a truncated-hash collision instead of silently trusting it.
+budget regardless of how long the actual workspace path is; the full hash,
+`workspaceRoot`, and `backendArgv` are recorded in a sidecar
+`<hash16>.meta.json`, written as soon as a process wins the election and
+becomes the daemon. Its original purpose is letting a connecting client
+detect a truncated-hash collision instead of silently trusting it; `bsp-mux
+stop` also reads it for the opposite direction — finding which daemon is
+running for a `(workspaceRoot, backendArgv)` pair without needing to
+reproduce whatever environment (`DEVELOPER_DIR`/`TOOLCHAINS`) originally
+elected it, since `stop` is typically run from a different shell than
+whatever launched the daemon in the first place.
 
 ### Election race
 

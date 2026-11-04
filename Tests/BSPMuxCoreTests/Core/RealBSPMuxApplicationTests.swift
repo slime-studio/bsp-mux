@@ -214,6 +214,9 @@ import Testing
     io.closeTestEnds()
   }
 
+  // Stop-over-the-wire (non-force graceful round trip, --force SIGKILL, the meta sidecar it
+  // persists) has its own file - RealBSPMuxApplicationStopTests.
+
   @Test func aSignalArrivingWhileDaemonEndsTeardownThroughTheGroupSignalPath() async throws {
     let backend = FakeDuplexChannel(remainsOpenWhenExhausted: true)
     let spawning = FakeBackendSpawning(results: [.success(backend)])

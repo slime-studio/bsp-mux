@@ -125,16 +125,31 @@ public actor Daemon {
     }
   }
 
-  /// An external `bsp-mux stop` request arrived over the wire (the `.bspMuxStop` case above) -
-  /// same effect on every connected session as the backend itself disconnecting (their in-flight
-  /// requests fail, the daemon winds down), reusing `handleBackendDisconnected()`'s already-
-  /// tested logic for exactly that reason. The one thing that reuse doesn't capture on its own:
-  /// the caller needs to know this shutdown, unlike an ordinary idle-timeout/backend-disconnect,
-  /// should force-kill the backend process rather than trusting it already exited or was already
-  /// asked nicely - `forcedShutdown` is that signal.
+  /// An external `bsp-mux stop` request arrived over the wire (the `.bspMuxStop` case above).
+  /// Every session with an in-flight request gets told this was an intentional admin stop (not
+  /// confused with the backend crashing - see `BSPMessages.daemonStoppedErrorResponse`'s doc
+  /// comment). Without `hardKill` (a plain `stop`), this also gives the backend the same real
+  /// `build/shutdown`/`build/exit` round trip `performShutdown()` sends on an ordinary idle
+  /// timeout, so it gets the chance to exit cooperatively; `RealBSPMuxApplication` correspondingly
+  /// uses `.normal` for the teardown reason in that case, same as an idle timeout, so
+  /// `DaemonTeardown` doesn't *also* force-signal the process group and race that attempt (see
+  /// its own doc comment on why). With `hardKill` (`--force`), the backend may be ignoring
+  /// `SIGTERM`/unresponsive, so there's no point asking nicely first - `forcedShutdown` tells
+  /// `RealBSPMuxApplication` to reach for `SIGKILL` on the process group instead.
   public func requestForcedShutdown(hardKill: Bool) async {
     forcedShutdownRequest = .requested(hardKill: hardKill)
-    await handleBackendDisconnected()
+    guard !hasShutDown else { return }
+
+    await failPendingWork(responseFor: BSPMessages.daemonStoppedErrorResponse, continuationError: DaemonStoppedError())
+
+    if !hardKill {
+      // Best-effort: the daemon is exiting either way, and a send failure here (e.g. the
+      // backend already died) doesn't change that.
+      try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
+      try? await backend.send(BSPMessages.exitNotificationData())
+    }
+
+    markShutDown()
   }
 
   private func handleInitialize(_ envelope: JSONRPCEnvelope, originalID: JSONRPCRawID) async throws -> Data {
@@ -261,17 +276,23 @@ public actor Daemon {
   /// than this one trying to respawn the backend in place.
   public func handleBackendDisconnected() async {
     guard !hasShutDown else { return }
+    await failPendingWork(responseFor: BSPMessages.backendDisconnectedErrorResponse, continuationError: BackendDisconnectedError())
+    markShutDown()
+  }
 
+  /// Fails every session with an in-flight request (and any suspended `build/initialize`
+  /// caller) with a caller-supplied error - shared between `handleBackendDisconnected()` and
+  /// `requestForcedShutdown()`, which differ only in *why* nothing more is coming back from the
+  /// backend and so need different wording, not different bookkeeping.
+  private func failPendingWork(responseFor errorResponse: (JSONRPCRawID) -> Data, continuationError: any Swift.Error) async {
     for (session, originalID) in pendingRequests.values {
-      try? await sessions[session]?.send(BSPMessages.backendDisconnectedErrorResponse(id: originalID))
+      try? await sessions[session]?.send(errorResponse(originalID))
     }
     pendingRequests.removeAll()
 
-    pendingInitializeContinuation?.resume(throwing: BackendDisconnectedError())
+    pendingInitializeContinuation?.resume(throwing: continuationError)
     pendingInitializeContinuation = nil
     pendingInitializeBackendID = nil
-
-    markShutDown()
   }
 
   private func markShutDown() {
@@ -285,6 +306,12 @@ public actor Daemon {
 
 public struct BackendDisconnectedError: Swift.Error, CustomStringConvertible, Equatable {
   public var description: String { "the build server process disconnected unexpectedly" }
+
+  public init() {}
+}
+
+public struct DaemonStoppedError: Swift.Error, CustomStringConvertible, Equatable {
+  public var description: String { "the bsp-mux daemon was stopped by an administrative request" }
 
   public init() {}
 }

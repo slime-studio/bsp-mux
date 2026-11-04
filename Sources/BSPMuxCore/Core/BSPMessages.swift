@@ -31,6 +31,7 @@ enum BSPMessages {
 
   private static let mismatchErrorCode = -32000
   private static let backendDisconnectedErrorCode = -32001
+  private static let daemonStoppedErrorCode = -32002
 
   static func mismatchErrorResponse(id: JSONRPCRawID, field: String) throws -> Data {
     let message = "initialize params (\(field)) do not match the daemon's existing session; a separate bsp-mux daemon is required"
@@ -51,6 +52,13 @@ enum BSPMessages {
   /// fixed message needs no dynamic escaping the way `mismatchErrorResponse`'s does.
   static func backendDisconnectedErrorResponse(id: JSONRPCRawID) -> Data {
     Data(#"{"jsonrpc":"2.0","id":\#(id.rawText),"error":{"code":\#(backendDisconnectedErrorCode),"message":"the build server process disconnected unexpectedly"}}"#.utf8)
+  }
+
+  /// Sent to every session with an in-flight request when an external `bsp-mux stop` ends the
+  /// daemon (`Daemon.requestForcedShutdown`) - distinct from `backendDisconnectedErrorResponse`
+  /// because this is an intentional admin action, not the backend dying unexpectedly.
+  static func daemonStoppedErrorResponse(id: JSONRPCRawID) -> Data {
+    Data(#"{"jsonrpc":"2.0","id":\#(id.rawText),"error":{"code":\#(daemonStoppedErrorCode),"message":"the bsp-mux daemon was stopped by an administrative request"}}"#.utf8)
   }
 
   static func shutdownRequestData(id: JSONRPCRawID) -> Data {
