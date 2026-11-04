@@ -137,8 +137,13 @@ public actor Daemon {
   /// `SIGTERM`/unresponsive, so there's no point asking nicely first - `forcedShutdown` tells
   /// `RealBSPMuxApplication` to reach for `SIGKILL` on the process group instead.
   public func requestForcedShutdown(hardKill: Bool) async {
-    forcedShutdownRequest = .requested(hardKill: hardKill)
+    // Guard first, like `handleBackendDisconnected()`/`performShutdown()`: a `bspMux/stop`
+    // that loses a race with a shutdown that already finished (e.g. an idle timeout) must not
+    // overwrite `forcedShutdownRequest` after the fact - `RealBSPMuxApplication` reads it once,
+    // right after `waitForShutdown()` resolves, to decide the teardown reason, and a stale
+    // write here would make it treat an already-completed graceful shutdown as a forced one.
     guard !hasShutDown else { return }
+    forcedShutdownRequest = .requested(hardKill: hardKill)
 
     await failPendingWork(responseFor: BSPMessages.daemonStoppedErrorResponse, continuationError: DaemonStoppedError())
 

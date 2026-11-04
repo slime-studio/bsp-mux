@@ -102,6 +102,13 @@ public struct DaemonStopSignal {
   /// Not `private`: tested directly (`@testable import`) so its selection logic can be verified
   /// without fighting `FakeElectionEnvironment`'s canned results, which don't vary by the path
   /// they're asked to connect to - same reasoning as `ProjectKey.resolveArgv`'s own visibility.
+  ///
+  /// Known accepted gap: if two *genuinely different* daemons are both alive for the same
+  /// (workspaceRoot, backendArgv) at once - a deliberately rare setup, e.g. the same project
+  /// opened under two different `DEVELOPER_DIR`s on purpose - their sidecars are indistinguishable
+  /// by this lookup, and the lexicographically-first one wins arbitrarily. Resolving that would
+  /// mean surfacing the ambiguity to the caller instead of silently picking one; not attempted
+  /// here since the common case (exactly one daemon) is what this fixes.
   func findRunningProjectKey(workspaceRoot: String, backendArgv: [String]) -> ProjectKey {
     let baseDirectory = ProjectPaths.defaultBaseDirectory()
     let resolvedWorkspaceRoot = fileSystem.resolvePath(workspaceRoot)

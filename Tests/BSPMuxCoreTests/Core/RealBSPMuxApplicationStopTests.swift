@@ -113,6 +113,29 @@ import Testing
     io.closeTestEnds()
   }
 
+  /// Sends a `build/initialize` request over `io`'s stdin, answers it from `backend`, and
+  /// waits for the reply on stdout - a real round trip used purely as a synchronization point
+  /// (proof the daemon branch has actually run) rather than for its own content.
+  private func roundTripInitialize(io: PipeStandardIO, backend: FakeDuplexChannel) async throws {
+    let initializeRequestJSON =
+      #"{"jsonrpc":"2.0","id":"1","method":"build/initialize","params":{"displayName":"editor","version":"1.0","#
+      + #""bspVersion":"2.1.0","rootUri":"file:///workspace","capabilities":{}}}"#
+    try await io.writeToStandardIn.write(MessageFraming.frame(Data(initializeRequestJSON.utf8)))
+    let forwarded = try JSONRPCEnvelope(rawBytes: await backend.waitForNextSentMessage())
+
+    let backendResponse = Data(
+      #"{"jsonrpc":"2.0","id":\#(forwarded.id!.rawText),"result":{"displayName":"backend","version":"1.0","bspVersion":"2.1.0","capabilities":{}}}"#
+        .utf8)
+    await backend.enqueueIncoming(backendResponse)
+    var reader = MessageFrameReader()
+    var replyBody: Data?
+    while replyBody == nil {
+      guard let chunk = try await io.readFromStandardOut.read() else { break }
+      replyBody = try reader.feed(chunk).first
+    }
+    _ = try #require(replyBody)
+  }
+
   @Test func daemonOutcomePersistsAProjectKeyMetaSidecarForStopToFindLater() async throws {
     let backend = FakeDuplexChannel(remainsOpenWhenExhausted: true)
     let spawning = FakeBackendSpawning(results: [.success(backend)])
@@ -147,17 +170,27 @@ import Testing
       )
     }
 
-    // Ends the daemon so `run` returns - the sidecar is written as soon as this process wins
-    // the election though, well before this.
-    let stopMessage = #"{"jsonrpc":"2.0","method":"bspMux/stop","params":{"force":true}}"#
-    try await io.writeToStandardIn.write(MessageFraming.frame(Data(stopMessage.utf8)))
-    try await run
+    // Proof the daemon branch has run far enough to have written the sidecar (which happens
+    // earlier in that same branch, before `DaemonBootstrap.start` even spawns the backend) -
+    // checked *before* stopping, since `DaemonTeardown` removes the sidecar as part of
+    // tearing down. Also leaves nothing suspended: the winner session's receive loop processes
+    // messages sequentially, so an unanswered `build/initialize` would block it from ever
+    // dispatching the `bspMux/stop` sent below.
+    try await roundTripInitialize(io: io, backend: backend)
 
     let metaData = try #require(fileSystem[expectedPaths.metaPath])
     let meta = try JSONDecoder().decode(ProjectKeyMeta.self, from: metaData)
     #expect(meta.fullHash == expectedKey.fullHash)
     #expect(meta.workspaceRoot == "/workspace")
     #expect(meta.backendArgv == backendArgv)
+
+    let stopMessage = #"{"jsonrpc":"2.0","method":"bspMux/stop","params":{"force":true}}"#
+    try await io.writeToStandardIn.write(MessageFraming.frame(Data(stopMessage.utf8)))
+    try await run
+
+    // DaemonTeardown must have cleaned the sidecar up on the way out too, or it'd shadow a
+    // future daemon's own meta lookup after this one's gone.
+    #expect(fileSystem[expectedPaths.metaPath] == nil)
 
     io.closeTestEnds()
   }

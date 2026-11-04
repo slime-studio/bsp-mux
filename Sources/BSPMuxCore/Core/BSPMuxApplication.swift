@@ -86,10 +86,10 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
       // call reaches `exit()` first actually ends the process before the other could matter.
       @Dependency(\.signalHandling) var signalHandling
       signalHandling.onSignal(SIGTERM) {
-        Task { await DaemonTeardown.run(reason: .signal(SIGTERM), socketPath: paths.socketPath) }
+        Task { await DaemonTeardown.run(reason: .signal(SIGTERM), socketPath: paths.socketPath, metaPath: paths.metaPath) }
       }
       signalHandling.onSignal(SIGINT) {
-        Task { await DaemonTeardown.run(reason: .signal(SIGINT), socketPath: paths.socketPath) }
+        Task { await DaemonTeardown.run(reason: .signal(SIGINT), socketPath: paths.socketPath, metaPath: paths.metaPath) }
       }
 
       await daemon.waitForShutdown()
@@ -105,7 +105,7 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
         // whole point of asking for it is "the backend isn't responding to being asked nicely."
         reason = hardKill ? .signal(SIGKILL) : .normal
       }
-      await DaemonTeardown.run(reason: reason, socketPath: paths.socketPath)
+      await DaemonTeardown.run(reason: reason, socketPath: paths.socketPath, metaPath: paths.metaPath)
     }
   }
 
