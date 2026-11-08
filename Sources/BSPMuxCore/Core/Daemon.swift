@@ -42,6 +42,15 @@ public actor Daemon {
   private var idleGraceTask: Task<Void, Never>?
   private var hasShutDown = false
   private var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
+  /// Set synchronously (before any `await`) by whichever of `performShutdown()`/
+  /// `handleBackendDisconnected()`/`requestForcedShutdown()` runs first, so a second one
+  /// racing in - e.g. two `bspMux/stop` messages arriving close together, or a `bspMux/stop`
+  /// racing the backend's own disconnect - can't also pass the `!hasShutDown` guard during the
+  /// first one's await points and duplicate its work (most concretely: sending the backend a
+  /// second `build/shutdown`/`build/exit` pair). Distinct from `hasShutDown` itself, which only
+  /// flips once the real work (and `waitForShutdown()`'s continuations) is done - this flips
+  /// the instant a path is *committed to*, not once it's *finished*.
+  private var isShuttingDown = false
 
   /// Whether an external `bsp-mux stop` request (see `handleClientMessage`'s `.bspMuxStop` case)
   /// is why this daemon is shutting down, and if so whether it asked for a hard kill - read by
@@ -54,8 +63,7 @@ public actor Daemon {
     case none
     case requested(hardKill: Bool)
   }
-  private var forcedShutdownRequest: ForcedShutdownRequest = .none
-  public var forcedShutdown: ForcedShutdownRequest { forcedShutdownRequest }
+  public private(set) var forcedShutdown: ForcedShutdownRequest = .none
 
   public init(backend: any DuplexChannel, idleGracePeriod: Duration = .seconds(5)) {
     self.backend = backend
@@ -139,11 +147,15 @@ public actor Daemon {
   public func requestForcedShutdown(hardKill: Bool) async {
     // Guard first, like `handleBackendDisconnected()`/`performShutdown()`: a `bspMux/stop`
     // that loses a race with a shutdown that already finished (e.g. an idle timeout) must not
-    // overwrite `forcedShutdownRequest` after the fact - `RealBSPMuxApplication` reads it once,
+    // overwrite `forcedShutdown` after the fact - `RealBSPMuxApplication` reads it once,
     // right after `waitForShutdown()` resolves, to decide the teardown reason, and a stale
     // write here would make it treat an already-completed graceful shutdown as a forced one.
-    guard !hasShutDown else { return }
-    forcedShutdownRequest = .requested(hardKill: hardKill)
+    // `isShuttingDown` additionally rules out a second concurrent `bspMux/stop` (or a race with
+    // `performShutdown()`/`handleBackendDisconnected()`) from also passing this guard during
+    // this call's own await points below and duplicating the backend round trip.
+    guard !hasShutDown, !isShuttingDown else { return }
+    isShuttingDown = true
+    forcedShutdown = .requested(hardKill: hardKill)
 
     await failPendingWork(responseFor: BSPMessages.daemonStoppedErrorResponse, continuationError: DaemonStoppedError())
 
@@ -261,7 +273,8 @@ public actor Daemon {
   }
 
   private func performShutdown() async {
-    guard !hasShutDown else { return }
+    guard !hasShutDown, !isShuttingDown else { return }
+    isShuttingDown = true
     // Best-effort: the daemon is exiting either way, and a send failure here (e.g. the
     // backend already died) doesn't change that.
     try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
@@ -280,7 +293,8 @@ public actor Daemon {
   /// reclaims it regardless. The next client action naturally re-elects a fresh daemon rather
   /// than this one trying to respawn the backend in place.
   public func handleBackendDisconnected() async {
-    guard !hasShutDown else { return }
+    guard !hasShutDown, !isShuttingDown else { return }
+    isShuttingDown = true
     await failPendingWork(responseFor: BSPMessages.backendDisconnectedErrorResponse, continuationError: BackendDisconnectedError())
     markShutDown()
   }

@@ -47,9 +47,11 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
   public func run(
     workspaceRoot: String, backendArgv: [String], standardIn: any ByteSource, standardOut: any ByteSink
   ) async throws {
+    @Dependency(\.fileSystem) var fileSystem
     let key = ProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
     let paths = ProjectPaths(key: key)
     try paths.ensureBaseDirectoryExists()
+    let metaRepository = ProjectKeyMetaRepository()
 
     switch try await Election(paths: paths).run() {
     case .relay(let connection):
@@ -60,8 +62,7 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
       // alone, without needing to reproduce whatever environment this process's own
       // ProjectKey(workspaceRoot:backendArgv:) call above happened to see - `stop` runs from an
       // arbitrary shell, not necessarily sourcekit-lsp's own process tree.
-      @Dependency(\.fileSystem) var fileSystem
-      try ProjectKeyMetaRepository().save(
+      try metaRepository.save(
         ProjectKeyMeta(
           key: key,
           workspaceRoot: fileSystem.resolvePath(workspaceRoot),
