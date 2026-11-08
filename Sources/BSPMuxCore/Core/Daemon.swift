@@ -40,8 +40,29 @@ public actor Daemon {
   private let idleGracePeriod: Duration
   @Dependency(\.continuousClock) private var clock
   private var idleGraceTask: Task<Void, Never>?
-  private var hasShutDown = false
   private var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
+
+  /// The three ways a daemon's life ends - `performShutdown()` (idle timeout),
+  /// `handleBackendDisconnected()` (the backend's own connection ending), and
+  /// `requestForcedShutdown()` (an external `bsp-mux stop`) - all fit the same shape: committed
+  /// to *once*, doing some async work, then done. A single enum is the actual state (as opposed
+  /// to two independently-mutable booleans standing in for it) so "is some path already
+  /// committed, even one still mid-flight" and "has a path actually finished" can't drift apart
+  /// or be checked against the wrong one by mistake.
+  private enum ShutdownPhase {
+    /// No path has started yet; still safe for any of the three to begin.
+    case running
+    /// A path is committed and running (possibly still only partway through its own awaits) -
+    /// enough on its own to keep every other path out, finished or not. Without this distinct
+    /// from `.shutDown`, two of the three methods could each observe "nothing's shut down yet"
+    /// during each other's suspension points and both proceed - concretely, the backend could
+    /// receive two `build/shutdown`/`build/exit` pairs from two racing `bspMux/stop` calls, or
+    /// from one racing the backend's own disconnect.
+    case shuttingDown
+    /// The committed path's work is done; `waitForShutdown()`'s continuations are resolved.
+    case shutDown
+  }
+  private var shutdownPhase: ShutdownPhase = .running
 
   /// Whether an external `bsp-mux stop` request (see `handleClientMessage`'s `.bspMuxStop` case)
   /// is why this daemon is shutting down, and if so whether it asked for a hard kill - read by
@@ -54,8 +75,7 @@ public actor Daemon {
     case none
     case requested(hardKill: Bool)
   }
-  private var forcedShutdownRequest: ForcedShutdownRequest = .none
-  public var forcedShutdown: ForcedShutdownRequest { forcedShutdownRequest }
+  public private(set) var forcedShutdown: ForcedShutdownRequest = .none
 
   public init(backend: any DuplexChannel, idleGracePeriod: Duration = .seconds(5)) {
     self.backend = backend
@@ -86,7 +106,7 @@ public actor Daemon {
   /// (the idle grace period elapsed with no new session registering). Callers awaiting this
   /// should then tear down and exit the process. Returns immediately if that's already happened.
   public func waitForShutdown() async {
-    guard !hasShutDown else { return }
+    guard shutdownPhase != .shutDown else { return }
     await withCheckedContinuation { continuation in
       shutdownContinuations.append(continuation)
     }
@@ -125,16 +145,39 @@ public actor Daemon {
     }
   }
 
-  /// An external `bsp-mux stop` request arrived over the wire (the `.bspMuxStop` case above) -
-  /// same effect on every connected session as the backend itself disconnecting (their in-flight
-  /// requests fail, the daemon winds down), reusing `handleBackendDisconnected()`'s already-
-  /// tested logic for exactly that reason. The one thing that reuse doesn't capture on its own:
-  /// the caller needs to know this shutdown, unlike an ordinary idle-timeout/backend-disconnect,
-  /// should force-kill the backend process rather than trusting it already exited or was already
-  /// asked nicely - `forcedShutdown` is that signal.
+  /// An external `bsp-mux stop` request arrived over the wire (the `.bspMuxStop` case above).
+  /// Every session with an in-flight request gets told this was an intentional admin stop (not
+  /// confused with the backend crashing - see `BSPMessages.daemonStoppedErrorResponse`'s doc
+  /// comment). Without `hardKill` (a plain `stop`), this also gives the backend the same real
+  /// `build/shutdown`/`build/exit` round trip `performShutdown()` sends on an ordinary idle
+  /// timeout, so it gets the chance to exit cooperatively; `RealBSPMuxApplication` correspondingly
+  /// uses `.normal` for the teardown reason in that case, same as an idle timeout, so
+  /// `DaemonTeardown` doesn't *also* force-signal the process group and race that attempt (see
+  /// its own doc comment on why). With `hardKill` (`--force`), the backend may be ignoring
+  /// `SIGTERM`/unresponsive, so there's no point asking nicely first - `forcedShutdown` tells
+  /// `RealBSPMuxApplication` to reach for `SIGKILL` on the process group instead.
   public func requestForcedShutdown(hardKill: Bool) async {
-    forcedShutdownRequest = .requested(hardKill: hardKill)
-    await handleBackendDisconnected()
+    // Guarding on `.running` (not just "hasn't finished yet") rules out both: a `bspMux/stop`
+    // that loses a race with a shutdown that already finished (e.g. an idle timeout) - which
+    // would otherwise overwrite `forcedShutdown` after the fact, since `RealBSPMuxApplication`
+    // reads it once, right after `waitForShutdown()` resolves - and a second concurrent
+    // `bspMux/stop` (or a race with `performShutdown()`/`handleBackendDisconnected()`) passing
+    // this same guard during this call's own await points below and duplicating the backend
+    // round trip.
+    guard shutdownPhase == .running else { return }
+    shutdownPhase = .shuttingDown
+    forcedShutdown = .requested(hardKill: hardKill)
+
+    await failPendingWork(responseFor: BSPMessages.daemonStoppedErrorResponse, continuationError: DaemonStoppedError())
+
+    if !hardKill {
+      // Best-effort: the daemon is exiting either way, and a send failure here (e.g. the
+      // backend already died) doesn't change that.
+      try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
+      try? await backend.send(BSPMessages.exitNotificationData())
+    }
+
+    markShutDown()
   }
 
   private func handleInitialize(_ envelope: JSONRPCEnvelope, originalID: JSONRPCRawID) async throws -> Data {
@@ -241,7 +284,8 @@ public actor Daemon {
   }
 
   private func performShutdown() async {
-    guard !hasShutDown else { return }
+    guard shutdownPhase == .running else { return }
+    shutdownPhase = .shuttingDown
     // Best-effort: the daemon is exiting either way, and a send failure here (e.g. the
     // backend already died) doesn't change that.
     try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
@@ -260,22 +304,29 @@ public actor Daemon {
   /// reclaims it regardless. The next client action naturally re-elects a fresh daemon rather
   /// than this one trying to respawn the backend in place.
   public func handleBackendDisconnected() async {
-    guard !hasShutDown else { return }
-
-    for (session, originalID) in pendingRequests.values {
-      try? await sessions[session]?.send(BSPMessages.backendDisconnectedErrorResponse(id: originalID))
-    }
-    pendingRequests.removeAll()
-
-    pendingInitializeContinuation?.resume(throwing: BackendDisconnectedError())
-    pendingInitializeContinuation = nil
-    pendingInitializeBackendID = nil
-
+    guard shutdownPhase == .running else { return }
+    shutdownPhase = .shuttingDown
+    await failPendingWork(responseFor: BSPMessages.backendDisconnectedErrorResponse, continuationError: BackendDisconnectedError())
     markShutDown()
   }
 
+  /// Fails every session with an in-flight request (and any suspended `build/initialize`
+  /// caller) with a caller-supplied error - shared between `handleBackendDisconnected()` and
+  /// `requestForcedShutdown()`, which differ only in *why* nothing more is coming back from the
+  /// backend and so need different wording, not different bookkeeping.
+  private func failPendingWork(responseFor errorResponse: (JSONRPCRawID) -> Data, continuationError: any Swift.Error) async {
+    for (session, originalID) in pendingRequests.values {
+      try? await sessions[session]?.send(errorResponse(originalID))
+    }
+    pendingRequests.removeAll()
+
+    pendingInitializeContinuation?.resume(throwing: continuationError)
+    pendingInitializeContinuation = nil
+    pendingInitializeBackendID = nil
+  }
+
   private func markShutDown() {
-    hasShutDown = true
+    shutdownPhase = .shutDown
     for continuation in shutdownContinuations {
       continuation.resume()
     }
@@ -285,6 +336,12 @@ public actor Daemon {
 
 public struct BackendDisconnectedError: Swift.Error, CustomStringConvertible, Equatable {
   public var description: String { "the build server process disconnected unexpectedly" }
+
+  public init() {}
+}
+
+public struct DaemonStoppedError: Swift.Error, CustomStringConvertible, Equatable {
+  public var description: String { "the bsp-mux daemon was stopped by an administrative request" }
 
   public init() {}
 }

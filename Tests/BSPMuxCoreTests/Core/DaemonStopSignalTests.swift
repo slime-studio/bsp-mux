@@ -60,6 +60,62 @@ import Glibc
     }
   }
 
+  @Test func findRunningProjectKeyPrefersAMatchingMetaSidecarOverRecomputingFromThisProcessesOwnEnvironment() throws {
+    // The fresh (env-based) hash this process would compute on its own differs from the
+    // sidecar's real one - simulating `stop` running with a different DEVELOPER_DIR/TOOLCHAINS
+    // than whatever elected the real daemon. The sidecar, matched on workspaceRoot/backendArgv
+    // alone, must win.
+    let realFullHash = String(repeating: "a", count: 64)
+    let baseDirectory = ProjectPaths.defaultBaseDirectory()
+    let meta = ProjectKeyMeta(key: ProjectKey(fullHash: realFullHash), workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"])
+    let fileSystem = InMemoryFileSystem([
+      "\(baseDirectory)/deadbeefdeadbeef.meta.json": try JSONEncoder().encode(meta)
+    ])
+
+    let key = withDependencies {
+      $0.fileSystem = fileSystem
+    } operation: {
+      DaemonStopSignal().findRunningProjectKey(workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"])
+    }
+
+    #expect(key.fullHash == realFullHash)
+  }
+
+  @Test func findRunningProjectKeyFallsBackToRecomputingWhenNoSidecarMatches() throws {
+    let fileSystem = InMemoryFileSystem()
+
+    let key = withDependencies {
+      $0.fileSystem = fileSystem
+    } operation: {
+      DaemonStopSignal().findRunningProjectKey(workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"])
+    }
+
+    let expected = withDependencies {
+      $0.fileSystem = fileSystem
+    } operation: {
+      ProjectKey(workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"])
+    }
+    #expect(key.fullHash == expected.fullHash)
+  }
+
+  @Test func findRunningProjectKeyIgnoresASidecarForADifferentWorkspace() throws {
+    let unrelatedFullHash = String(repeating: "b", count: 64)
+    let baseDirectory = ProjectPaths.defaultBaseDirectory()
+    let meta = ProjectKeyMeta(
+      key: ProjectKey(fullHash: unrelatedFullHash), workspaceRoot: "/some/other/workspace", backendArgv: ["/usr/bin/backend"])
+    let fileSystem = InMemoryFileSystem([
+      "\(baseDirectory)/cafecafecafecafe.meta.json": try JSONEncoder().encode(meta)
+    ])
+
+    let key = withDependencies {
+      $0.fileSystem = fileSystem
+    } operation: {
+      DaemonStopSignal().findRunningProjectKey(workspaceRoot: "/workspace", backendArgv: ["/usr/bin/backend"])
+    }
+
+    #expect(key.fullHash != unrelatedFullHash)
+  }
+
   @Test func wrappedWithNoLiveDaemonReportsNotRunning() async throws {
     let fileSystem = InMemoryFileSystem(["/workspace/buildServer.json": try Self.wrappedBuildServerJSON()])
     let environment = FakeElectionEnvironment(connectResults: [.absent])
@@ -90,10 +146,12 @@ import Glibc
   @Test func wrappedWithALiveDaemonSendsTheStopMessageAndConfirmsTeardown() async throws {
     try await Self.withRealConnectedFDPair { daemonEnd, _ in
       let fileSystem = InMemoryFileSystem(["/workspace/buildServer.json": try Self.wrappedBuildServerJSON()])
-      let environment = FakeElectionEnvironment(connectResults: [
-        .success(ConnectionHandle(fileDescriptor: daemonEnd)),  // the actual send
-        .absent,  // first poll check already finds the socket gone
-      ])
+      let environment = FakeElectionEnvironment(
+        connectResults: [.success(ConnectionHandle(fileDescriptor: daemonEnd))],  // the actual send
+        // The flock being acquirable (nobody holds it) is what actually confirms the daemon
+        // exited - not the socket's disappearance, which happens earlier in its teardown.
+        lockResults: [.acquired(LockHandle(fileDescriptor: 999))]
+      )
 
       let result = try await withDependencies {
         $0.fileSystem = fileSystem
@@ -104,18 +162,18 @@ import Glibc
       }
 
       #expect(result.outcome == .stopped)
-      #expect(environment.calls == ["connect", "connect"])
+      #expect(environment.calls == ["connect", "acquireLock"])
     }
   }
 
   @Test func wrappedWithADaemonThatNeverConfirmsTeardownThrowsRatherThanHangingForever() async throws {
     try await Self.withRealConnectedFDPair { daemonEnd, _ in
       let fileSystem = InMemoryFileSystem(["/workspace/buildServer.json": try Self.wrappedBuildServerJSON()])
-      // The send succeeds, but every subsequent poll still finds the socket alive - never
-      // reports .stopped. 61 results: 1 for the send + 60 for every poll attempt.
-      var connectResults: [FakeElectionEnvironment.ConnectResult] = [.success(ConnectionHandle(fileDescriptor: daemonEnd))]
-      connectResults.append(contentsOf: Array(repeating: .success(ConnectionHandle(fileDescriptor: daemonEnd)), count: 60))
-      let environment = FakeElectionEnvironment(connectResults: connectResults)
+      let environment = FakeElectionEnvironment(
+        connectResults: [.success(ConnectionHandle(fileDescriptor: daemonEnd))],  // the actual send
+        // The daemon's flock is still held on every poll attempt - never reports .stopped.
+        lockResults: Array(repeating: .contended, count: 60)
+      )
 
       await #expect(throws: DaemonStopSignal.Error.self) {
         try await withDependencies {

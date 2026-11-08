@@ -47,15 +47,30 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
   public func run(
     workspaceRoot: String, backendArgv: [String], standardIn: any ByteSource, standardOut: any ByteSink
   ) async throws {
+    @Dependency(\.fileSystem) var fileSystem
     let key = ProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
     let paths = ProjectPaths(key: key)
     try paths.ensureBaseDirectoryExists()
+    let metaRepository = ProjectKeyMetaRepository()
 
     switch try await Election(paths: paths).run() {
     case .relay(let connection):
       try await RelaySession.run(connection: connection, standardIn: standardIn, standardOut: standardOut)
 
     case .daemon(let listening, _):
+      // Persisted so `DaemonStopSignal` can find this daemon by (workspaceRoot, backendArgv)
+      // alone, without needing to reproduce whatever environment this process's own
+      // ProjectKey(workspaceRoot:backendArgv:) call above happened to see - `stop` runs from an
+      // arbitrary shell, not necessarily sourcekit-lsp's own process tree.
+      try metaRepository.save(
+        ProjectKeyMeta(
+          key: key,
+          workspaceRoot: fileSystem.resolvePath(workspaceRoot),
+          backendArgv: ProjectKey.resolveArgv(backendArgv, using: fileSystem)
+        ),
+        to: paths.metaPath
+      )
+
       // The lock's fd is deliberately never closed here (see ElectionEnvironment's doc comment -
       // process exit is the only correct release); same rule for `listening`'s fd (see
       // AcceptLoop's doc comment).
@@ -72,10 +87,10 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
       // call reaches `exit()` first actually ends the process before the other could matter.
       @Dependency(\.signalHandling) var signalHandling
       signalHandling.onSignal(SIGTERM) {
-        Task { await DaemonTeardown.run(reason: .signal(SIGTERM), socketPath: paths.socketPath) }
+        Task { await DaemonTeardown.run(reason: .signal(SIGTERM), socketPath: paths.socketPath, metaPath: paths.metaPath) }
       }
       signalHandling.onSignal(SIGINT) {
-        Task { await DaemonTeardown.run(reason: .signal(SIGINT), socketPath: paths.socketPath) }
+        Task { await DaemonTeardown.run(reason: .signal(SIGINT), socketPath: paths.socketPath, metaPath: paths.metaPath) }
       }
 
       await daemon.waitForShutdown()
@@ -84,9 +99,14 @@ public struct RealBSPMuxApplication: BSPMuxApplication {
       case .none:
         reason = .normal
       case .requested(let hardKill):
-        reason = .signal(hardKill ? SIGKILL : SIGTERM)
+        // A plain (non-force) stop already got `Daemon` to attempt a real `build/shutdown`/
+        // `build/exit` round trip with the backend - `.normal` here, same as an idle timeout,
+        // so DaemonTeardown doesn't *also* force-signal the process group and race that
+        // attempt (see its own doc comment). `--force` skips straight to `SIGKILL`, since the
+        // whole point of asking for it is "the backend isn't responding to being asked nicely."
+        reason = hardKill ? .signal(SIGKILL) : .normal
       }
-      await DaemonTeardown.run(reason: reason, socketPath: paths.socketPath)
+      await DaemonTeardown.run(reason: reason, socketPath: paths.socketPath, metaPath: paths.metaPath)
     }
   }
 

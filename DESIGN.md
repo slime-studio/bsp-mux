@@ -143,6 +143,25 @@ no-op unless `--force` is passed, in which case the existing wrapped argv
 is unwrapped (split at `--`) and rewrapped, so repeated `--force` runs
 never nest wrappers.
 
+`sourcekit-lsp` doesn't only look for `buildServer.json` — per the [BSP
+spec's discovery mechanism](https://build-server-protocol.github.io/docs/overview/server-discovery),
+the standard location is `<workspace>/.bsp/*.json`, and `buildServer.json`
+is explicitly a pre-6.1 compatibility fallback that's only consulted if no
+matching `.bsp/*.json` exists (confirmed against `sourcekit-lsp`'s
+`ExternalBuildServerAdapter.getConfigPath`). Today's motivating backend,
+`sourcekit-xcode-bsp`, only ever writes `buildServer.json` (its `init`
+command), so this doesn't affect the project's actual current use case —
+but if a workspace ever grows a `.bsp/*.json` with an overlapping language
+(another backend, a future `sourcekit-xcode-bsp` version, a monorepo with
+two BSP tools), `sourcekit-lsp` would silently prefer that file and never
+look at `buildServer.json` at all, making an `install` into `buildServer.json`
+silently ineffective. Rather than widening `install` to also handle `.bsp`
+(out of scope — not the discovery mechanism anything here actually uses),
+`install` checks for a competing `.bsp/*.json` whose `languages` overlaps
+sourcekit-lsp's relevant set (`swift`, `c`, `cpp`, `objective-c`,
+`objective-cpp`) and fails loudly before touching `buildServer.json` if one
+exists, rather than wrapping a file that would never be read.
+
 ### Project key
 
 SHA256 over:
@@ -161,9 +180,16 @@ under `/tmp` (`/tmp/bsp-mux-<uid>/`), not under `$TMPDIR` — on Darwin that's
 a long per-session path (`/var/folders/.../T/...`) that would consume most
 of the `sockaddr_un` budget (~104 bytes total) on its own. Filenames are
 the first 16 hex chars of the SHA256 (64 bits) to stay well within that
-budget regardless of how long the actual workspace path is; the full hash
-is recorded in a sidecar `<hash16>.meta.json` so a connecting client can
-detect a truncated-hash collision instead of silently trusting it.
+budget regardless of how long the actual workspace path is; the full hash,
+`workspaceRoot`, and `backendArgv` are recorded in a sidecar
+`<hash16>.meta.json`, written as soon as a process wins the election and
+becomes the daemon. Its original purpose is letting a connecting client
+detect a truncated-hash collision instead of silently trusting it; `bsp-mux
+stop` also reads it for the opposite direction — finding which daemon is
+running for a `(workspaceRoot, backendArgv)` pair without needing to
+reproduce whatever environment (`DEVELOPER_DIR`/`TOOLCHAINS`) originally
+elected it, since `stop` is typically run from a different shell than
+whatever launched the daemon in the first place.
 
 ### Election race
 

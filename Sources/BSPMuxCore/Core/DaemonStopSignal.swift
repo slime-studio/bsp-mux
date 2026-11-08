@@ -55,7 +55,7 @@ public struct DaemonStopSignal {
     }
 
     let backendArgv = Installer.backendArgv(unwrapping: wrappedArgv)
-    let key = ProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
+    let key = findRunningProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
     let paths = ProjectPaths(key: key)
 
     guard let connection = try environment.connect(to: paths.socketPath) else {
@@ -64,17 +64,21 @@ public struct DaemonStopSignal {
     let stream = RealDuplexByteStream(fileDescriptor: connection.fileDescriptor)
     let channel = FramedDuplexChannel(source: stream, sink: stream)
     let message = #"{"jsonrpc":"2.0","method":"bspMux/stop","params":{"force":\#(force)}}"#
+    defer { close(connection.fileDescriptor) }
     try await channel.send(Data(message.utf8))
-    close(connection.fileDescriptor)
 
-    // Confirm the daemon actually unlinked the socket and exited, rather than just hoping the
-    // message got through - bounded so a daemon that never responds (the accepted "genuinely
-    // deadlocked" gap) fails loudly instead of this hanging forever.
+    // Confirm the daemon actually exited, rather than just hoping the message got through or
+    // trusting the socket's disappearance alone - DaemonTeardown unlinks the socket *before*
+    // signaling/exiting the backend, so a gone socket doesn't yet mean the backend is actually
+    // down. The flock (held for the daemon's entire lifetime, released only by the kernel on
+    // exit - see Election's own reasoning) is the authoritative "is a daemon still alive"
+    // signal, so poll that instead. Bounded so a daemon that never responds (the accepted
+    // "genuinely deadlocked" gap) fails loudly instead of this hanging forever.
     for _ in 0..<60 {
-      guard let stillListening = try environment.connect(to: paths.socketPath) else {
+      if let lock = try environment.acquireLockNonBlocking(atPath: paths.lockPath) {
+        close(lock.fileDescriptor)
         return StopResult(outcome: .stopped)
       }
-      close(stillListening.fileDescriptor)
       try await clock.sleep(for: .milliseconds(50))
     }
     throw Error(
@@ -82,6 +86,42 @@ public struct DaemonStopSignal {
         "Sent the stop request, but the daemon at \(paths.socketPath) didn't respond within 3s - "
         + "it may be stuck. You may need to find and stop its process manually."
     )
+  }
+
+  /// Finds the `ProjectKey` for the daemon actually running for this (workspaceRoot,
+  /// backendArgv) pair, without needing to reproduce whatever environment originally elected
+  /// it - this runs from an arbitrary shell invoking `bsp-mux stop`, not necessarily the same
+  /// process tree (e.g. an editor) that launched the daemon, so `DEVELOPER_DIR`/`TOOLCHAINS`
+  /// here may legitimately differ from what the daemon's own `ProjectKey` hashed. `Election`
+  /// persists a `ProjectKeyMeta` sidecar alongside the socket precisely so a lookup like this
+  /// can match on `workspaceRoot`/`backendArgv` alone and reuse the daemon's real `fullHash`
+  /// directly, rather than guessing at a hash. Falls back to recomputing from this process's
+  /// own environment (the only option before that sidecar existed) if no sidecar matches - a
+  /// daemon that hasn't reached that point in its own startup yet, or one from before this
+  /// wiring existed.
+  /// Not `private`: tested directly (`@testable import`) so its selection logic can be verified
+  /// without fighting `FakeElectionEnvironment`'s canned results, which don't vary by the path
+  /// they're asked to connect to - same reasoning as `ProjectKey.resolveArgv`'s own visibility.
+  ///
+  /// Known accepted gap: if two *genuinely different* daemons are both alive for the same
+  /// (workspaceRoot, backendArgv) at once - a deliberately rare setup, e.g. the same project
+  /// opened under two different `DEVELOPER_DIR`s on purpose - their sidecars are indistinguishable
+  /// by this lookup, and the lexicographically-first one wins arbitrarily. Resolving that would
+  /// mean surfacing the ambiguity to the caller instead of silently picking one; not attempted
+  /// here since the common case (exactly one daemon) is what this fixes.
+  func findRunningProjectKey(workspaceRoot: String, backendArgv: [String]) -> ProjectKey {
+    let baseDirectory = ProjectPaths.defaultBaseDirectory()
+    let resolvedWorkspaceRoot = fileSystem.resolvePath(workspaceRoot)
+    let resolvedBackendArgv = ProjectKey.resolveArgv(backendArgv, using: fileSystem)
+    let metaRepository = ProjectKeyMetaRepository()
+
+    for entry in fileSystem.contentsOfDirectory(atPath: baseDirectory).sorted() where entry.hasSuffix(".meta.json") {
+      guard let meta = try? metaRepository.load(from: "\(baseDirectory)/\(entry)"),
+        meta.workspaceRoot == resolvedWorkspaceRoot, meta.backendArgv == resolvedBackendArgv
+      else { continue }
+      return ProjectKey(fullHash: meta.fullHash)
+    }
+    return ProjectKey(workspaceRoot: workspaceRoot, backendArgv: backendArgv)
   }
 }
 

@@ -17,12 +17,17 @@ public enum ShutdownReason: Sendable, Equatable {
 /// statements (no actual concurrency inside this function): unlink before signaling the group,
 /// both before exiting.
 public enum DaemonTeardown {
-  public static func run(reason: ShutdownReason, socketPath: String) async {
+  /// - Parameter metaPath: The `ProjectKeyMeta` sidecar `Election` wrote when this process
+  ///   became the daemon. Removed alongside the socket - left behind, it would keep matching
+  ///   `DaemonStopSignal.findRunningProjectKey`'s (workspaceRoot, backendArgv) lookup for a
+  ///   daemon that's no longer running, able to shadow a genuinely live one.
+  public static func run(reason: ShutdownReason, socketPath: String, metaPath: String) async {
     @Dependency(\.fileSystem) var fileSystem
     @Dependency(\.electionEnvironment) var electionEnvironment
     @Dependency(\.processExiting) var processExiting
 
     fileSystem.remove(atPath: socketPath)
+    fileSystem.remove(atPath: metaPath)
 
     // Only the signal path force-signals the backend's process group. The normal path already
     // sent a graceful `build/shutdown`/`build/exit` - signaling the group here too would race

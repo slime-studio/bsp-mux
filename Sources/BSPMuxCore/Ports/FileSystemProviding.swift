@@ -17,6 +17,8 @@ public protocol FileSystemProviding: Sendable {
   func write(_ data: Data, toPath path: String) throws
   func remove(atPath path: String)
   func resolvePath(_ path: String) -> String
+  /// Entry names directly inside `path` (not full paths), or `[]` if `path` doesn't exist.
+  func contentsOfDirectory(atPath path: String) -> [String]
 }
 
 public struct RealFileSystem: FileSystemProviding {
@@ -47,6 +49,10 @@ public struct RealFileSystem: FileSystemProviding {
     // lookup rather than an absolute path). Fall back to lexical standardization rather
     // than failing key derivation outright.
     return URL(fileURLWithPath: path).standardizedFileURL.path
+  }
+
+  public func contentsOfDirectory(atPath path: String) -> [String] {
+    (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
   }
 }
 

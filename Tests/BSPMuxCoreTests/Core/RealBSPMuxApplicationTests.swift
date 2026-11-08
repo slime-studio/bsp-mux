@@ -204,15 +204,18 @@ import Testing
 
     // Proves `.daemon`'s normal-shutdown path really reaches `DaemonTeardown`, not just that
     // `DaemonTeardown` works in isolation (`DaemonTeardownTests` already covers that) - mirrors
-    // this suite's own "prove real wiring" philosophy. Two removals, not one: `Election` itself
+    // this suite's own "prove real wiring" philosophy. Three removals, not one: `Election` itself
     // already removes any stale socket at the same path before binding (see `Election.swift`),
-    // and `DaemonTeardown` removes it again on the way out.
-    #expect(fileSystem.removedPaths.count == 2)
+    // and `DaemonTeardown` removes both the socket and the meta sidecar again on the way out.
+    #expect(fileSystem.removedPaths.count == 3)
     #expect(processExiting.exitCodes == [0])
     #expect(!environment.calls.contains("signalOwnProcessGroup"))
 
     io.closeTestEnds()
   }
+
+  // Stop-over-the-wire (non-force graceful round trip, --force SIGKILL, the meta sidecar it
+  // persists) has its own file - RealBSPMuxApplicationStopTests.
 
   @Test func aSignalArrivingWhileDaemonEndsTeardownThroughTheGroupSignalPath() async throws {
     let backend = FakeDuplexChannel(remainsOpenWhenExhausted: true)
@@ -268,9 +271,10 @@ import Testing
     // rather than racing it.
     await processExiting.waitForExit()
 
-    // Two removals, not one: `Election` itself already removed the (nonexistent) stale socket
-    // before binding (see `Election.swift`), and `DaemonTeardown`'s signal path removes it again.
-    #expect(fileSystem.removedPaths.count == 2)
+    // Three removals, not one: `Election` itself already removed the (nonexistent) stale
+    // socket before binding (see `Election.swift`), and `DaemonTeardown`'s signal path removes
+    // both the socket and the meta sidecar again.
+    #expect(fileSystem.removedPaths.count == 3)
     #expect(environment.calls.contains("signalOwnProcessGroup"))
     #expect(processExiting.exitCodes == [0])
 

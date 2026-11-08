@@ -84,7 +84,13 @@ struct StopArguments: ParsableCommand {
   @Option(name: .customLong("workspace-root"), help: "Absolute path to the project's workspace root.")
   var workspaceRoot: String
 
-  @Flag(name: .customLong("force"), help: "Use SIGKILL rather than SIGTERM for the backend's process group.")
+  @Flag(
+    name: .customLong("force"),
+    help: """
+      Skip the graceful BSP shutdown handshake and SIGKILL the backend's process group \
+      directly, for a backend that's unresponsive or ignoring the graceful attempt.
+      """
+  )
   var force = false
 }
 

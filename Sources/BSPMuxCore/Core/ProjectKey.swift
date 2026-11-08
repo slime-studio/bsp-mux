@@ -60,6 +60,16 @@ public struct ProjectKey: Sendable, Equatable {
     self.shortHash = String(fullHash.prefix(16))
   }
 
+  /// Reconstructs a key from a previously-computed `fullHash` (e.g. read back from a
+  /// `ProjectKeyMeta` sidecar file) instead of hashing fresh inputs - for a caller that already
+  /// has independent proof of which project this is (a sidecar whose `workspaceRoot`/
+  /// `backendArgv` match) and just needs `ProjectPaths`, without needing to reproduce whatever
+  /// environment originally computed the hash (`DaemonStopSignal`'s reason for existing).
+  public init(fullHash: String) {
+    self.fullHash = fullHash
+    self.shortHash = String(fullHash.prefix(16))
+  }
+
   /// Resolves argv[0] (the backend executable) to a real path so e.g. a symlinked or
   /// PATH-relative backend doesn't produce a different key than an equivalent absolute one.
   /// Remaining args are passed through unresolved — they may not be paths at all.
@@ -79,12 +89,17 @@ public struct ProjectPaths: Sendable {
   public let lockPath: String
   public let metaPath: String
 
-  /// - Parameter baseDirectory: Overridable for testing; defaults to a short, fixed,
-  ///   per-user path directly under `/tmp`. Deliberately not under `$TMPDIR` — on Darwin
-  ///   that's a long per-session path (`/var/folders/.../T/`) that would consume most of
-  ///   the `sockaddr_un` budget on its own. The per-uid segment avoids path/permission
-  ///   collisions between users on a shared multi-user machine.
-  public init(key: ProjectKey, baseDirectory: String = "/tmp/bsp-mux-\(getuid())") {
+  /// The short, fixed, per-user path directly under `/tmp` every `ProjectPaths` lives under by
+  /// default. Deliberately not under `$TMPDIR` — on Darwin that's a long per-session path
+  /// (`/var/folders/.../T/`) that would consume most of the `sockaddr_un` budget on its own.
+  /// The per-uid segment avoids path/permission collisions between users on a shared
+  /// multi-user machine. Exposed as its own function (rather than only a default parameter
+  /// value below) so a caller that needs this directory without a `ProjectKey` in hand yet -
+  /// `DaemonStopSignal` scanning every project's sidecar meta file - doesn't have to duplicate it.
+  public static func defaultBaseDirectory() -> String { "/tmp/bsp-mux-\(getuid())" }
+
+  /// - Parameter baseDirectory: Overridable for testing; defaults to `defaultBaseDirectory()`.
+  public init(key: ProjectKey, baseDirectory: String = ProjectPaths.defaultBaseDirectory()) {
     self.baseDirectory = baseDirectory
     self.socketPath = "\(baseDirectory)/\(key.shortHash).sock"
     self.lockPath = "\(baseDirectory)/\(key.shortHash).lock"
