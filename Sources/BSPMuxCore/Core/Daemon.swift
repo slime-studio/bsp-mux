@@ -40,17 +40,29 @@ public actor Daemon {
   private let idleGracePeriod: Duration
   @Dependency(\.continuousClock) private var clock
   private var idleGraceTask: Task<Void, Never>?
-  private var hasShutDown = false
   private var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
-  /// Set synchronously (before any `await`) by whichever of `performShutdown()`/
-  /// `handleBackendDisconnected()`/`requestForcedShutdown()` runs first, so a second one
-  /// racing in - e.g. two `bspMux/stop` messages arriving close together, or a `bspMux/stop`
-  /// racing the backend's own disconnect - can't also pass the `!hasShutDown` guard during the
-  /// first one's await points and duplicate its work (most concretely: sending the backend a
-  /// second `build/shutdown`/`build/exit` pair). Distinct from `hasShutDown` itself, which only
-  /// flips once the real work (and `waitForShutdown()`'s continuations) is done - this flips
-  /// the instant a path is *committed to*, not once it's *finished*.
-  private var isShuttingDown = false
+
+  /// The three ways a daemon's life ends - `performShutdown()` (idle timeout),
+  /// `handleBackendDisconnected()` (the backend's own connection ending), and
+  /// `requestForcedShutdown()` (an external `bsp-mux stop`) - all fit the same shape: committed
+  /// to *once*, doing some async work, then done. A single enum is the actual state (as opposed
+  /// to two independently-mutable booleans standing in for it) so "is some path already
+  /// committed, even one still mid-flight" and "has a path actually finished" can't drift apart
+  /// or be checked against the wrong one by mistake.
+  private enum ShutdownPhase {
+    /// No path has started yet; still safe for any of the three to begin.
+    case running
+    /// A path is committed and running (possibly still only partway through its own awaits) -
+    /// enough on its own to keep every other path out, finished or not. Without this distinct
+    /// from `.shutDown`, two of the three methods could each observe "nothing's shut down yet"
+    /// during each other's suspension points and both proceed - concretely, the backend could
+    /// receive two `build/shutdown`/`build/exit` pairs from two racing `bspMux/stop` calls, or
+    /// from one racing the backend's own disconnect.
+    case shuttingDown
+    /// The committed path's work is done; `waitForShutdown()`'s continuations are resolved.
+    case shutDown
+  }
+  private var shutdownPhase: ShutdownPhase = .running
 
   /// Whether an external `bsp-mux stop` request (see `handleClientMessage`'s `.bspMuxStop` case)
   /// is why this daemon is shutting down, and if so whether it asked for a hard kill - read by
@@ -94,7 +106,7 @@ public actor Daemon {
   /// (the idle grace period elapsed with no new session registering). Callers awaiting this
   /// should then tear down and exit the process. Returns immediately if that's already happened.
   public func waitForShutdown() async {
-    guard !hasShutDown else { return }
+    guard shutdownPhase != .shutDown else { return }
     await withCheckedContinuation { continuation in
       shutdownContinuations.append(continuation)
     }
@@ -145,16 +157,15 @@ public actor Daemon {
   /// `SIGTERM`/unresponsive, so there's no point asking nicely first - `forcedShutdown` tells
   /// `RealBSPMuxApplication` to reach for `SIGKILL` on the process group instead.
   public func requestForcedShutdown(hardKill: Bool) async {
-    // Guard first, like `handleBackendDisconnected()`/`performShutdown()`: a `bspMux/stop`
-    // that loses a race with a shutdown that already finished (e.g. an idle timeout) must not
-    // overwrite `forcedShutdown` after the fact - `RealBSPMuxApplication` reads it once,
-    // right after `waitForShutdown()` resolves, to decide the teardown reason, and a stale
-    // write here would make it treat an already-completed graceful shutdown as a forced one.
-    // `isShuttingDown` additionally rules out a second concurrent `bspMux/stop` (or a race with
-    // `performShutdown()`/`handleBackendDisconnected()`) from also passing this guard during
-    // this call's own await points below and duplicating the backend round trip.
-    guard !hasShutDown, !isShuttingDown else { return }
-    isShuttingDown = true
+    // Guarding on `.running` (not just "hasn't finished yet") rules out both: a `bspMux/stop`
+    // that loses a race with a shutdown that already finished (e.g. an idle timeout) - which
+    // would otherwise overwrite `forcedShutdown` after the fact, since `RealBSPMuxApplication`
+    // reads it once, right after `waitForShutdown()` resolves - and a second concurrent
+    // `bspMux/stop` (or a race with `performShutdown()`/`handleBackendDisconnected()`) passing
+    // this same guard during this call's own await points below and duplicating the backend
+    // round trip.
+    guard shutdownPhase == .running else { return }
+    shutdownPhase = .shuttingDown
     forcedShutdown = .requested(hardKill: hardKill)
 
     await failPendingWork(responseFor: BSPMessages.daemonStoppedErrorResponse, continuationError: DaemonStoppedError())
@@ -273,8 +284,8 @@ public actor Daemon {
   }
 
   private func performShutdown() async {
-    guard !hasShutDown, !isShuttingDown else { return }
-    isShuttingDown = true
+    guard shutdownPhase == .running else { return }
+    shutdownPhase = .shuttingDown
     // Best-effort: the daemon is exiting either way, and a send failure here (e.g. the
     // backend already died) doesn't change that.
     try? await backend.send(BSPMessages.shutdownRequestData(id: mintBackendRequestID()))
@@ -293,8 +304,8 @@ public actor Daemon {
   /// reclaims it regardless. The next client action naturally re-elects a fresh daemon rather
   /// than this one trying to respawn the backend in place.
   public func handleBackendDisconnected() async {
-    guard !hasShutDown, !isShuttingDown else { return }
-    isShuttingDown = true
+    guard shutdownPhase == .running else { return }
+    shutdownPhase = .shuttingDown
     await failPendingWork(responseFor: BSPMessages.backendDisconnectedErrorResponse, continuationError: BackendDisconnectedError())
     markShutDown()
   }
@@ -315,7 +326,7 @@ public actor Daemon {
   }
 
   private func markShutDown() {
-    hasShutDown = true
+    shutdownPhase = .shutDown
     for continuation in shutdownContinuations {
       continuation.resume()
     }
