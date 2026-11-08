@@ -123,7 +123,7 @@ import Testing
       $0.fileSystem = fs
     } operation: {
       let installer = Installer()
-      #expect(throws: Installer.Error.self) {
+      #expect(throws: BuildServerJSON.Error.self) {
         try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
       }
     }
@@ -139,7 +139,7 @@ import Testing
       $0.fileSystem = fs
     } operation: {
       let installer = Installer()
-      #expect(throws: Installer.Error.self) {
+      #expect(throws: BuildServerJSON.Error.self) {
         try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
       }
     }
@@ -153,7 +153,7 @@ import Testing
       $0.fileSystem = fs
     } operation: {
       let installer = Installer()
-      #expect(throws: Installer.Error.self) {
+      #expect(throws: BuildServerJSON.Error.self) {
         try installer.install(workspaceRoot: Self.workspaceRoot, multiplexerExecutable: Self.multiplexerExecutable)
       }
     }

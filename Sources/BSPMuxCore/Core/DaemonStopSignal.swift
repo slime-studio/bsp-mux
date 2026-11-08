@@ -35,18 +35,11 @@ public struct DaemonStopSignal {
   ///     be alive and processing messages to honor either (see this type's own design notes for
   ///     why a genuinely deadlocked daemon is a known, accepted gap here).
   public func stop(workspaceRoot: String, multiplexerExecutable: String, force: Bool) async throws -> StopResult {
-    let buildServerJSONPath = "\(workspaceRoot)/buildServer.json"
-    guard fileSystem.fileExists(atPath: buildServerJSONPath) else {
-      throw Error(description: "No buildServer.json found at \(buildServerJSONPath) - nothing to stop.")
-    }
-
-    let data = try fileSystem.contents(atPath: buildServerJSONPath)
-    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-      throw Error(description: "\(buildServerJSONPath) does not contain a JSON object")
-    }
-    guard let wrappedArgv = json["argv"] as? [String], !wrappedArgv.isEmpty else {
-      throw Error(description: "\(buildServerJSONPath) has no non-empty 'argv' array")
-    }
+    let loaded = try BuildServerJSON.load(
+      workspaceRoot: workspaceRoot, missingFileGuidance: "nothing to stop.", using: fileSystem
+    )
+    let buildServerJSONPath = loaded.path
+    let wrappedArgv = loaded.argv
     let resolvedMultiplexerPath = fileSystem.resolvePath(multiplexerExecutable)
     guard wrappedArgv.first.map({ fileSystem.resolvePath($0) }) == resolvedMultiplexerPath else {
       throw Error(
