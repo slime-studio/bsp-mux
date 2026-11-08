@@ -23,7 +23,7 @@ import Glibc
   @Test func noBuildServerJSONThrowsAClearError() async throws {
     let fileSystem = InMemoryFileSystem()
 
-    await #expect(throws: DaemonStopSignal.Error.self) {
+    await #expect(throws: BuildServerJSON.Error.self) {
       try await withDependencies {
         $0.fileSystem = fileSystem
       } operation: {
@@ -37,7 +37,7 @@ import Glibc
       "/workspace/buildServer.json": try JSONSerialization.data(withJSONObject: ["name": "backend"])
     ])
 
-    await #expect(throws: DaemonStopSignal.Error.self) {
+    await #expect(throws: BuildServerJSON.Error.self) {
       try await withDependencies {
         $0.fileSystem = fileSystem
       } operation: {

@@ -50,22 +50,15 @@ public struct Installer {
       )
     }
 
-    let buildServerJSONPath = "\(workspaceRoot)/buildServer.json"
-    guard fileSystem.fileExists(atPath: buildServerJSONPath) else {
-      throw Error(
-        description:
-          "No buildServer.json found at \(buildServerJSONPath). Set up the real BSP backend's "
-          + "buildServer.json first (e.g. `sourcekit-xcode-bsp init`), then re-run install."
-      )
-    }
-
-    let data = try fileSystem.contents(atPath: buildServerJSONPath)
-    guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-      throw Error(description: "\(buildServerJSONPath) does not contain a JSON object")
-    }
-    guard let existingArgv = json["argv"] as? [String], !existingArgv.isEmpty else {
-      throw Error(description: "\(buildServerJSONPath) has no non-empty 'argv' array")
-    }
+    let loaded = try BuildServerJSON.load(
+      workspaceRoot: workspaceRoot,
+      missingFileGuidance: "set up the real BSP backend's buildServer.json first "
+        + "(e.g. `sourcekit-xcode-bsp init`), then re-run install.",
+      using: fileSystem
+    )
+    let buildServerJSONPath = loaded.path
+    var json = loaded.json
+    let existingArgv = loaded.argv
 
     let resolvedMultiplexerPath = fileSystem.resolvePath(multiplexerExecutable)
     let resolvedWorkspaceRoot = fileSystem.resolvePath(workspaceRoot)
