@@ -280,21 +280,32 @@ without hand-rolled locking) owns:
   correlating them to whichever request triggered the work — routed only
   to the session that owns that `originId` (default to broadcast if
   unmapped).
-- `build/logMessage` goes to the daemon's own log file, not to any client —
-  unattributable backend-internal logs aren't generally useful fanned out
-  across N clients.
+- `build/logMessage` goes to the daemon's own log (see Logging, below), not
+  to any client — unattributable backend-internal logs aren't generally
+  useful fanned out across N clients.
 - Unknown/future notification methods default to broadcast, on the theory
   that over-delivering is safer than silently dropping something a client
   needed.
 
 ### Logging
 
-File-based, never stdout (that's the wire protocol for whichever session is
-running over the daemon's own stdio) and never bare stderr (once the
-editor that originally launched the daemon exits while other clients
-remain connected, stderr may point at a pipe with no reader — `SIGPIPE` is
-ignored defensively, but routing real diagnostics to a file avoids the
+Never stdout (that's the wire protocol for whichever session is running
+over the daemon's own stdio) and never bare stderr (once the editor that
+originally launched the daemon exits while other clients remain
+connected, stderr may point at a pipe with no reader — `SIGPIPE` is
+ignored defensively, but routing real diagnostics elsewhere avoids the
 problem rather than just surviving it).
+
+The real destination is Apple's unified logging (`os.Logger`) on Darwin —
+a deliberate, scoped exception to this project's general POSIX-portability
+goal, made because unified logging already solves storage/retention/
+rotation and non-blocking delivery with zero custom code, and because
+logging has no bearing on whether the daemon/election/relay/backend-
+spawning logic — the actual portable core — works on Linux. Every other
+platform gets a silently-discarding no-op instead of a hand-rolled file
+logger, at least for now; nothing in the daemon's own correctness depends
+on a log line actually landing anywhere; a logging failure or absence is
+never a reason for any of it to behave differently.
 
 ## Dependency: `swift-tools-protocols`
 

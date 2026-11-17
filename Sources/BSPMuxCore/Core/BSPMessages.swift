@@ -68,4 +68,24 @@ enum BSPMessages {
   static func exitNotificationData() -> Data {
     Data(#"{"jsonrpc":"2.0","method":"\#(String.buildExit)"}"#.utf8)
   }
+
+  /// `build/logMessage`'s `message` field, properly JSON-decoded - `paramsField` itself only
+  /// peeks at a byte range (still quoted/escaped exactly as it appeared on the wire), since it's
+  /// not a full parse. `nil` if the field is missing or isn't a valid JSON string literal.
+  static func logMessageText(_ envelope: JSONRPCEnvelope) -> String? {
+    guard let raw = envelope.paramsField("message"), let data = raw.data(using: .utf8) else { return nil }
+    return (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) as? String
+  }
+
+  /// Maps BSP's `MessageType` (1=Error, 2=Warning, 3=Info, 4=Log) onto this project's own
+  /// `LogLevel` - deliberately lossy (both Info and Log collapse to `.info`, and anything
+  /// unrecognized defaults there too), matching `LogLevel`'s own doc comment on why it isn't a
+  /// one-for-one mirror of BSP's wire type.
+  static func logMessageLevel(_ envelope: JSONRPCEnvelope) -> LogLevel {
+    switch envelope.paramsField("type") {
+    case "1": return .error
+    case "2": return .warning
+    default: return .info
+    }
+  }
 }

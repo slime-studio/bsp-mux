@@ -31,9 +31,22 @@ import Testing
   }
 
   @Test func liveValueDiscardsWithoutThrowingOrCrashing() {
-    // Not overridden - exercises the placeholder liveValue directly, confirming it's safe to
-    // call even though nothing production-facing depends on it yet.
-    let liveLogging: any Logging = DiscardingLogging()
-    liveLogging.log(.error, "should be silently discarded")
+    // Exercises the non-Darwin liveValue/testValue placeholder directly, confirming it's safe
+    // to call even though it drops everything.
+    let discarding: any Logging = DiscardingLogging()
+    discarding.log(.error, "should be silently discarded")
   }
+
+  #if canImport(os)
+  @Test func osLoggingAcceptsEveryLevelWithoutThrowingOrCrashing() {
+    // Doesn't assert on unified logging's own store (not something this codebase's fake-based
+    // test style can reach, and not necessary - `Daemon` only ever talks to the `Logging`
+    // protocol, never to `OSLogging` concretely). Just confirms the level mapping covers every
+    // case without a runtime trap.
+    let osLogging: any Logging = OSLogging()
+    osLogging.log(.info, "info level")
+    osLogging.log(.warning, "warning level")
+    osLogging.log(.error, "error level")
+  }
+  #endif
 }
