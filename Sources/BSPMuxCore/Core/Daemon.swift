@@ -39,6 +39,7 @@ public actor Daemon {
 
   private let idleGracePeriod: Duration
   @Dependency(\.continuousClock) private var clock
+  @Dependency(\.logging) private var logging
   private var idleGraceTask: Task<Void, Never>?
   private var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
 
@@ -258,7 +259,11 @@ public actor Daemon {
   private func routeBackendNotification(_ envelope: JSONRPCEnvelope) async throws {
     if envelope.method == .buildLogMessage {
       // Daemon-internal only: unattributable backend logs aren't generally useful fanned out
-      // across every client. (Not yet wired to an actual log file - see the type doc.)
+      // across every client. Falls back to the raw notification if `message` isn't a decodable
+      // JSON string, so a malformed backend notification still leaves a trail instead of
+      // vanishing silently.
+      let text = BSPMessages.logMessageText(envelope) ?? String(bytes: envelope.rawBytes, encoding: .utf8) ?? "<non-UTF8 build/logMessage>"
+      logging.log(BSPMessages.logMessageLevel(envelope), text)
       return
     }
 

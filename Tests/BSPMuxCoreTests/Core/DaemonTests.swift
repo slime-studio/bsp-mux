@@ -149,15 +149,44 @@ import Testing
     #expect(await channelA.sentMessages.count == 1)
   }
 
-  @Test func buildLogMessageIsNeverForwardedToAnyClient() async throws {
+  @Test func buildLogMessageIsNeverForwardedToAnyClientButIsLogged() async throws {
     let backend = FakeDuplexChannel()
     let channelA = FakeDuplexChannel()
-    let daemon = Daemon(backend: backend)
-    _ = await daemon.registerSession(channel: channelA)
+    let logger = FakeLogging()
 
-    try await daemon.handleBackendMessage(envelope: Self.notification(method: "build/logMessage"))
+    try await withDependencies {
+      $0.logging = logger
+    } operation: {
+      let daemon = Daemon(backend: backend)
+      _ = await daemon.registerSession(channel: channelA)
 
-    #expect(await channelA.sentMessages.isEmpty)
+      let notification = try JSONRPCEnvelope(
+        rawBytes: Data(#"{"jsonrpc":"2.0","method":"build/logMessage","params":{"type":2,"message":"low disk space"}}"#.utf8))
+      try await daemon.handleBackendMessage(envelope: notification)
+
+      #expect(await channelA.sentMessages.isEmpty)
+    }
+
+    #expect(logger.messages == [LoggedMessage(level: .warning, message: "low disk space")])
+  }
+
+  @Test func buildLogMessageFallsBackToTheRawNotificationWhenMessageFieldIsntADecodableString() async throws {
+    let backend = FakeDuplexChannel()
+    let logger = FakeLogging()
+
+    try await withDependencies {
+      $0.logging = logger
+    } operation: {
+      let daemon = Daemon(backend: backend)
+      // "message" is a number, not a string - not a valid JSON string literal to decode.
+      let notification = try JSONRPCEnvelope(
+        rawBytes: Data(#"{"jsonrpc":"2.0","method":"build/logMessage","params":{"type":1,"message":42}}"#.utf8))
+      try await daemon.handleBackendMessage(envelope: notification)
+    }
+
+    #expect(logger.messages.count == 1)
+    #expect(logger.messages[0].level == .error)
+    #expect(logger.messages[0].message.contains("build/logMessage"))
   }
 
   @Test func customVendorMethodRequestFlowsThroughEndToEnd() async throws {
